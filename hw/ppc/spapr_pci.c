@@ -393,6 +393,12 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     for (i = 0; i < req_num; i++) {
         spapr_irq_claim(spapr, irq + i, false, &err);
         if (err) {
+            if (i) {
+                spapr_irq_free(spapr, irq, i);
+            }
+            if (!smc->legacy_irq_allocation) {
+                spapr_irq_msi_free(spapr, irq, req_num);
+            }
             error_reportf_err(err, "Can't allocate MSIs for device %x: ",
                               config_addr);
             rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
@@ -964,7 +970,7 @@ static void populate_resource_props(PCIDevice *d, ResourceProps *rp)
         }
 
         assigned = &rp->assigned[assigned_idx++];
-        assigned->phys_hi = cpu_to_be32(reg->phys_hi | b_n(1));
+        assigned->phys_hi = cpu_to_be32(be32_to_cpu(reg->phys_hi) | b_n(1));
         assigned->phys_mid = cpu_to_be32(d->io_regions[i].addr >> 32);
         assigned->phys_lo = cpu_to_be32(d->io_regions[i].addr);
         assigned->size_hi = reg->size_hi;
@@ -1680,7 +1686,7 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
                                 &sphb->memspace, &sphb->iospace,
                                 PCI_DEVFN(0, 0), PCI_NUM_PINS, TYPE_PCI_BUS);
     phb->bus = bus;
-    qbus_set_hotplug_handler(BUS(phb->bus), DEVICE(sphb), NULL);
+    qbus_set_hotplug_handler(BUS(phb->bus), OBJECT(sphb), NULL);
 
     /*
      * Initialize PHB address space.
@@ -2030,8 +2036,6 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
                                            void *opaque)
 {
     unsigned int *bus_no = opaque;
-    unsigned int primary = *bus_no;
-    unsigned int subordinate = 0xff;
     PCIBus *sec_bus = NULL;
 
     if ((pci_default_read_config(pdev, PCI_HEADER_TYPE, 1) !=
@@ -2040,7 +2044,7 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
     }
 
     (*bus_no)++;
-    pci_default_write_config(pdev, PCI_PRIMARY_BUS, primary, 1);
+    pci_default_write_config(pdev, PCI_PRIMARY_BUS, pci_dev_bus_num(pdev), 1);
     pci_default_write_config(pdev, PCI_SECONDARY_BUS, *bus_no, 1);
     pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, *bus_no, 1);
 
@@ -2049,7 +2053,6 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
         return;
     }
 
-    pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, subordinate, 1);
     pci_for_each_device(sec_bus, pci_bus_num(sec_bus),
                         spapr_phb_pci_enumerate_bridge, bus_no);
     pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, *bus_no, 1);
@@ -2066,7 +2069,7 @@ static void spapr_phb_pci_enumerate(sPAPRPHBState *phb)
 
 }
 
-int spapr_populate_pci_dt(sPAPRPHBState *phb, uint32_t xics_phandle, void *fdt,
+int spapr_populate_pci_dt(sPAPRPHBState *phb, uint32_t intc_phandle, void *fdt,
                           uint32_t nr_msis)
 {
     int bus_off, i, j, ret;
@@ -2164,8 +2167,8 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb, uint32_t xics_phandle, void *fdt,
             irqmap[1] = 0;
             irqmap[2] = 0;
             irqmap[3] = cpu_to_be32(j+1);
-            irqmap[4] = cpu_to_be32(xics_phandle);
-            spapr_dt_xics_irq(&irqmap[5], phb->lsi_table[lsi_num].irq, true);
+            irqmap[4] = cpu_to_be32(intc_phandle);
+            spapr_dt_irq(&irqmap[5], phb->lsi_table[lsi_num].irq, true);
         }
     }
     /* Write interrupt map */

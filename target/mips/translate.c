@@ -2450,6 +2450,7 @@ enum {
 static TCGv cpu_gpr[32], cpu_PC;
 static TCGv cpu_HI[MIPS_DSP_ACC], cpu_LO[MIPS_DSP_ACC];
 static TCGv cpu_dspctrl, btarget, bcond;
+static TCGv cpu_lladdr, cpu_llval;
 static TCGv_i32 hflags;
 static TCGv_i32 fpu_fcr0, fpu_fcr31;
 static TCGv_i64 fpu_f64[32];
@@ -3326,48 +3327,6 @@ OP_LD_ATOMIC(lld,ld64);
 #endif
 #undef OP_LD_ATOMIC
 
-#ifdef CONFIG_USER_ONLY
-#define OP_ST_ATOMIC(insn,fname,ldname,almask)                               \
-static inline void op_st_##insn(TCGv arg1, TCGv arg2, int rt, int mem_idx,   \
-                                DisasContext *ctx)                           \
-{                                                                            \
-    TCGv t0 = tcg_temp_new();                                                \
-    TCGLabel *l1 = gen_new_label();                                          \
-    TCGLabel *l2 = gen_new_label();                                          \
-                                                                             \
-    tcg_gen_andi_tl(t0, arg2, almask);                                       \
-    tcg_gen_brcondi_tl(TCG_COND_EQ, t0, 0, l1);                              \
-    tcg_gen_st_tl(arg2, cpu_env, offsetof(CPUMIPSState, CP0_BadVAddr));          \
-    generate_exception(ctx, EXCP_AdES);                                      \
-    gen_set_label(l1);                                                       \
-    tcg_gen_ld_tl(t0, cpu_env, offsetof(CPUMIPSState, lladdr));                  \
-    tcg_gen_brcond_tl(TCG_COND_NE, arg2, t0, l2);                            \
-    tcg_gen_movi_tl(t0, rt | ((almask << 3) & 0x20));                        \
-    tcg_gen_st_tl(t0, cpu_env, offsetof(CPUMIPSState, llreg));                   \
-    tcg_gen_st_tl(arg1, cpu_env, offsetof(CPUMIPSState, llnewval));              \
-    generate_exception_end(ctx, EXCP_SC);                                    \
-    gen_set_label(l2);                                                       \
-    tcg_gen_movi_tl(t0, 0);                                                  \
-    gen_store_gpr(t0, rt);                                                   \
-    tcg_temp_free(t0);                                                       \
-}
-#else
-#define OP_ST_ATOMIC(insn,fname,ldname,almask)                               \
-static inline void op_st_##insn(TCGv arg1, TCGv arg2, int rt, int mem_idx,   \
-                                DisasContext *ctx)                           \
-{                                                                            \
-    TCGv t0 = tcg_temp_new();                                                \
-    gen_helper_1e2i(insn, t0, arg1, arg2, mem_idx);                          \
-    gen_store_gpr(t0, rt);                                                   \
-    tcg_temp_free(t0);                                                       \
-}
-#endif
-OP_ST_ATOMIC(sc,st32,ld32s,0x3);
-#if defined(TARGET_MIPS64)
-OP_ST_ATOMIC(scd,st64,ld64,0x7);
-#endif
-#undef OP_ST_ATOMIC
-
 static void gen_base_offset_addr (DisasContext *ctx, TCGv addr,
                                   int base, int offset)
 {
@@ -3679,42 +3638,40 @@ static void gen_st (DisasContext *ctx, uint32_t opc, int rt,
 
 
 /* Store conditional */
-static void gen_st_cond (DisasContext *ctx, uint32_t opc, int rt,
-                         int base, int16_t offset)
+static void gen_st_cond(DisasContext *ctx, int rt, int base, int offset,
+                        TCGMemOp tcg_mo, bool eva)
 {
-    TCGv t0, t1;
-    int mem_idx = ctx->mem_idx;
+    TCGv addr, t0, val;
+    TCGLabel *l1 = gen_new_label();
+    TCGLabel *done = gen_new_label();
 
-#ifdef CONFIG_USER_ONLY
-    t0 = tcg_temp_local_new();
-    t1 = tcg_temp_local_new();
-#else
     t0 = tcg_temp_new();
-    t1 = tcg_temp_new();
-#endif
-    gen_base_offset_addr(ctx, t0, base, offset);
-    gen_load_gpr(t1, rt);
-    switch (opc) {
-#if defined(TARGET_MIPS64)
-    case OPC_SCD:
-    case R6_OPC_SCD:
-        op_st_scd(t1, t0, rt, mem_idx, ctx);
-        break;
-#endif
-    case OPC_SCE:
-        mem_idx = MIPS_HFLAG_UM;
-        /* fall through */
-    case OPC_SC:
-    case R6_OPC_SC:
-        op_st_sc(t1, t0, rt, mem_idx, ctx);
-        break;
-    }
-    tcg_temp_free(t1);
+    addr = tcg_temp_new();
+    /* compare the address against that of the preceeding LL */
+    gen_base_offset_addr(ctx, addr, base, offset);
+    tcg_gen_brcond_tl(TCG_COND_EQ, addr, cpu_lladdr, l1);
+    tcg_temp_free(addr);
+    tcg_gen_movi_tl(t0, 0);
+    gen_store_gpr(t0, rt);
+    tcg_gen_br(done);
+
+    gen_set_label(l1);
+    /* generate cmpxchg */
+    val = tcg_temp_new();
+    gen_load_gpr(val, rt);
+    tcg_gen_atomic_cmpxchg_tl(t0, cpu_lladdr, cpu_llval, val,
+                              eva ? MIPS_HFLAG_UM : ctx->mem_idx, tcg_mo);
+    tcg_gen_setcond_tl(TCG_COND_EQ, t0, t0, cpu_llval);
+    gen_store_gpr(t0, rt);
+    tcg_temp_free(val);
+
+    gen_set_label(done);
     tcg_temp_free(t0);
 }
 
+
 static void gen_scwp(DisasContext *ctx, uint32_t base, int16_t offset,
-                    uint32_t reg1, uint32_t reg2)
+                    uint32_t reg1, uint32_t reg2, bool eva)
 {
     TCGv taddr = tcg_temp_local_new();
     TCGv lladdr = tcg_temp_local_new();
@@ -3742,7 +3699,7 @@ static void gen_scwp(DisasContext *ctx, uint32_t base, int16_t offset,
 
     tcg_gen_ld_i64(llval, cpu_env, offsetof(CPUMIPSState, llval_wp));
     tcg_gen_atomic_cmpxchg_i64(val, taddr, llval, tval,
-                               ctx->mem_idx, MO_64);
+                               eva ? MIPS_HFLAG_UM : ctx->mem_idx, MO_64);
     if (reg1 != 0) {
         tcg_gen_movi_tl(cpu_gpr[reg1], 1);
     }
@@ -6612,7 +6569,7 @@ static void gen_mfhc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     case CP0_REGISTER_17:
         switch (sel) {
         case 0:
-            gen_mfhc0_load64(arg, offsetof(CPUMIPSState, lladdr),
+            gen_mfhc0_load64(arg, offsetof(CPUMIPSState, CP0_LLAddr),
                              ctx->CP0_LLAddr_shift);
             register_name = "LLAddr";
             break;
@@ -16864,13 +16821,13 @@ static void decode_micromips32_opc(CPUMIPSState *env, DisasContext *ctx)
             gen_st(ctx, mips32_op, rt, rs, offset);
             break;
         case SC:
-            gen_st_cond(ctx, OPC_SC, rt, rs, offset);
+            gen_st_cond(ctx, rt, rs, offset, MO_TESL, false);
             break;
 #if defined(TARGET_MIPS64)
         case SCD:
             check_insn(ctx, ISA_MIPS3);
             check_mips_64(ctx);
-            gen_st_cond(ctx, OPC_SCD, rt, rs, offset);
+            gen_st_cond(ctx, rt, rs, offset, MO_TEQ, false);
             break;
 #endif
         case LD_EVA:
@@ -16951,7 +16908,7 @@ static void decode_micromips32_opc(CPUMIPSState *env, DisasContext *ctx)
                 mips32_op = OPC_SHE;
                 goto do_st_lr;
             case SCE:
-                gen_st_cond(ctx, OPC_SCE, rt, rs, offset);
+                gen_st_cond(ctx, rt, rs, offset, MO_TESL, true);
                 break;
             case SWE:
                 mips32_op = OPC_SWE;
@@ -18460,10 +18417,9 @@ enum {
 
 /* extraction utilities */
 
-#define NANOMIPS_EXTRACT_RD(op) ((op >> 7) & 0x7)
-#define NANOMIPS_EXTRACT_RS(op) ((op >> 4) & 0x7)
-#define NANOMIPS_EXTRACT_RS2(op) uMIPS_RS(op)
-#define NANOMIPS_EXTRACT_RS1(op) ((op >> 1) & 0x7)
+#define NANOMIPS_EXTRACT_RT3(op) ((op >> 7) & 0x7)
+#define NANOMIPS_EXTRACT_RS3(op) ((op >> 4) & 0x7)
+#define NANOMIPS_EXTRACT_RD3(op) ((op >> 1) & 0x7)
 #define NANOMIPS_EXTRACT_RD5(op) ((op >> 5) & 0x1f)
 #define NANOMIPS_EXTRACT_RS5(op) (op & 0x1f)
 
@@ -18500,16 +18456,6 @@ static inline int decode_gpr_gpr4_zero(int r)
 
     return map[r & 0xf];
 }
-
-
-/* extraction utilities */
-
-#define NANOMIPS_EXTRACT_RD(op) ((op >> 7) & 0x7)
-#define NANOMIPS_EXTRACT_RS(op) ((op >> 4) & 0x7)
-#define NANOMIPS_EXTRACT_RS2(op) uMIPS_RS(op)
-#define NANOMIPS_EXTRACT_RS1(op) ((op >> 1) & 0x7)
-#define NANOMIPS_EXTRACT_RD5(op) ((op >> 5) & 0x1f)
-#define NANOMIPS_EXTRACT_RS5(op) (op & 0x1f)
 
 
 static void gen_adjust_sp(DisasContext *ctx, int u)
@@ -18570,8 +18516,8 @@ static void gen_restore(DisasContext *ctx, uint8_t rt, uint8_t count,
 
 static void gen_pool16c_nanomips_insn(DisasContext *ctx)
 {
-    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD(ctx->opcode));
-    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
+    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RT3(ctx->opcode));
+    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
 
     switch (extract32(ctx->opcode, 2, 2)) {
     case NM_NOT16:
@@ -19769,6 +19715,10 @@ static void gen_compute_imm_branch(DisasContext *ctx, uint32_t opc,
         goto out;
     }
 
+    /* branch completion */
+    clear_branch_hflags(ctx);
+    ctx->base.is_jmp = DISAS_NORETURN;
+
     if (bcond_compute == 0) {
         /* Uncoditional compact branch */
         gen_goto_tb(ctx, 0, ctx->btarget);
@@ -19808,6 +19758,10 @@ static void gen_compute_nanomips_pbalrsc_branch(DisasContext *ctx, int rs,
     tcg_gen_shli_tl(t0, t0, 1);
     tcg_gen_movi_tl(t1, ctx->base.pc_next + 4);
     gen_op_addr_add(ctx, btarget, t1, t0);
+
+    /* branch completion */
+    clear_branch_hflags(ctx);
+    ctx->base.is_jmp = DISAS_NORETURN;
 
     /* unconditional branch to register */
     tcg_gen_mov_tl(cpu_PC, btarget);
@@ -19946,6 +19900,10 @@ static void gen_compute_compact_branch_nm(DisasContext *ctx, uint32_t opc,
             generate_exception_end(ctx, EXCP_RI);
             goto out;
         }
+
+        /* branch completion */
+        clear_branch_hflags(ctx);
+        ctx->base.is_jmp = DISAS_NORETURN;
 
         /* Generating branch here as compact branches don't have delay slot */
         gen_goto_tb(ctx, 1, ctx->btarget);
@@ -21557,11 +21515,12 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                 case NM_P_SC:
                     switch (ctx->opcode & 0x03) {
                     case NM_SC:
-                        gen_st_cond(ctx, OPC_SC, rt, rs, s);
+                        gen_st_cond(ctx, rt, rs, s, MO_TESL, false);
                         break;
                     case NM_SCWP:
                         check_xnp(ctx);
-                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5));
+                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5),
+                                 false);
                         break;
                     }
                     break;
@@ -21659,13 +21618,14 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                         check_xnp(ctx);
                         check_eva(ctx);
                         check_cp0_enabled(ctx);
-                        gen_st_cond(ctx, OPC_SCE, rt, rs, s);
+                        gen_st_cond(ctx, rt, rs, s, MO_TESL, true);
                         break;
                     case NM_SCWPE:
                         check_xnp(ctx);
                         check_eva(ctx);
                         check_cp0_enabled(ctx);
-                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5));
+                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5),
+                                 true);
                         break;
                     default:
                         generate_exception_end(ctx, EXCP_RI);
@@ -21872,9 +21832,9 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
 static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t op;
-    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD(ctx->opcode));
-    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
-    int rd = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS1(ctx->opcode));
+    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RT3(ctx->opcode));
+    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
+    int rd = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD3(ctx->opcode));
     int offset;
     int imm;
 
@@ -22037,7 +21997,7 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
             break;
         case NM_SB16:
             rt = decode_gpr_gpr3_src_store(
-                     NANOMIPS_EXTRACT_RD(ctx->opcode));
+                     NANOMIPS_EXTRACT_RT3(ctx->opcode));
             gen_st(ctx, OPC_SB, rt, rs, offset);
             break;
         case NM_LBU16:
@@ -22056,7 +22016,7 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
             break;
         case NM_SH16:
             rt = decode_gpr_gpr3_src_store(
-                     NANOMIPS_EXTRACT_RD(ctx->opcode));
+                     NANOMIPS_EXTRACT_RT3(ctx->opcode));
             gen_st(ctx, OPC_SH, rt, rs, offset);
             break;
         case NM_LHU16:
@@ -22111,14 +22071,14 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
         break;
     case NM_SW16:
         rt = decode_gpr_gpr3_src_store(
-                 NANOMIPS_EXTRACT_RD(ctx->opcode));
-        rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
+                 NANOMIPS_EXTRACT_RT3(ctx->opcode));
+        rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
         offset = extract32(ctx->opcode, 0, 4) << 2;
         gen_st(ctx, OPC_SW, rt, rs, offset);
         break;
     case NM_SWGP16:
         rt = decode_gpr_gpr3_src_store(
-                 NANOMIPS_EXTRACT_RD(ctx->opcode));
+                 NANOMIPS_EXTRACT_RT3(ctx->opcode));
         offset = extract32(ctx->opcode, 0, 7) << 2;
         gen_st(ctx, OPC_SW, rt, 28, offset);
         break;
@@ -26695,7 +26655,7 @@ static void decode_opc_special3_r6(CPUMIPSState *env, DisasContext *ctx)
         }
         break;
     case R6_OPC_SC:
-        gen_st_cond(ctx, op1, rt, rs, imm);
+        gen_st_cond(ctx, rt, rs, imm, MO_TESL, false);
         break;
     case R6_OPC_LL:
         gen_ld(ctx, op1, rt, rs, imm);
@@ -26722,7 +26682,7 @@ static void decode_opc_special3_r6(CPUMIPSState *env, DisasContext *ctx)
         break;
 #if defined(TARGET_MIPS64)
     case R6_OPC_SCD:
-        gen_st_cond(ctx, op1, rt, rs, imm);
+        gen_st_cond(ctx, rt, rs, imm, MO_TEQ, false);
         break;
     case R6_OPC_LLD:
         gen_ld(ctx, op1, rt, rs, imm);
@@ -27577,7 +27537,7 @@ static void decode_opc_special3(CPUMIPSState *env, DisasContext *ctx)
             return;
         case OPC_SCE:
             check_cp0_enabled(ctx);
-            gen_st_cond(ctx, op1, rt, rs, imm);
+            gen_st_cond(ctx, rt, rs, imm, MO_TESL, true);
             return;
         case OPC_CACHEE:
             check_cp0_enabled(ctx);
@@ -29169,8 +29129,8 @@ static void decode_opc(CPUMIPSState *env, DisasContext *ctx)
         if (ctx->insn_flags & INSN_R5900) {
             check_insn_opc_user_only(ctx, INSN_R5900);
         }
-         gen_st_cond(ctx, op, rt, rs, imm);
-         break;
+        gen_st_cond(ctx, rt, rs, imm, MO_TESL, false);
+        break;
     case OPC_CACHE:
         check_insn_opc_removed(ctx, ISA_MIPS32R6);
         check_cp0_enabled(ctx);
@@ -29469,7 +29429,7 @@ static void decode_opc(CPUMIPSState *env, DisasContext *ctx)
             check_insn_opc_user_only(ctx, INSN_R5900);
         }
         check_mips_64(ctx);
-        gen_st_cond(ctx, op, rt, rs, imm);
+        gen_st_cond(ctx, rt, rs, imm, MO_TEQ, false);
         break;
     case OPC_BNVC: /* OPC_BNEZALC, OPC_BNEC, OPC_DADDI */
         if (ctx->insn_flags & ISA_MIPS32R6) {
@@ -29792,7 +29752,7 @@ void mips_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
                 env->CP0_Status, env->CP0_Cause, env->CP0_EPC);
     cpu_fprintf(f, "    Config0 0x%08x Config1 0x%08x LLAddr 0x%016"
                 PRIx64 "\n",
-                env->CP0_Config0, env->CP0_Config1, env->lladdr);
+                env->CP0_Config0, env->CP0_Config1, env->CP0_LLAddr);
     cpu_fprintf(f, "    Config2 0x%08x Config3 0x%08x\n",
                 env->CP0_Config2, env->CP0_Config3);
     cpu_fprintf(f, "    Config4 0x%08x Config5 0x%08x\n",
@@ -29850,6 +29810,10 @@ void mips_tcg_init(void)
     fpu_fcr31 = tcg_global_mem_new_i32(cpu_env,
                                        offsetof(CPUMIPSState, active_fpu.fcr31),
                                        "fcr31");
+    cpu_lladdr = tcg_global_mem_new(cpu_env, offsetof(CPUMIPSState, lladdr),
+                                    "lladdr");
+    cpu_llval = tcg_global_mem_new(cpu_env, offsetof(CPUMIPSState, llval),
+                                   "llval");
 
 #if defined(TARGET_MIPS64)
     cpu_mmr[0] = NULL;
@@ -29894,7 +29858,7 @@ bool cpu_supports_cps_smp(const char *cpu_type)
     return (mcc->cpu_def->CP0_Config3 & (1 << CP0C3_CMGCR)) != 0;
 }
 
-bool cpu_supports_isa(const char *cpu_type, unsigned int isa)
+bool cpu_supports_isa(const char *cpu_type, uint64_t isa)
 {
     const MIPSCPUClass *mcc = MIPS_CPU_CLASS(object_class_by_name(cpu_type));
     return (mcc->cpu_def->insn_flags & isa) != 0;

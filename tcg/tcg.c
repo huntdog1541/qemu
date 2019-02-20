@@ -305,6 +305,9 @@ TCGLabel *gen_new_label(void)
     *l = (TCGLabel){
         .id = s->nb_labels++
     };
+#ifdef CONFIG_DEBUG_TCG
+    QSIMPLEQ_INSERT_TAIL(&s->labels, l, next);
+#endif
 
     return l;
 }
@@ -1092,6 +1095,9 @@ void tcg_func_start(TCGContext *s)
 
     QTAILQ_INIT(&s->ops);
     QTAILQ_INIT(&s->free_ops);
+#ifdef CONFIG_DEBUG_TCG
+    QSIMPLEQ_INIT(&s->labels);
+#endif
 }
 
 static inline TCGTemp *tcg_temp_alloc(TCGContext *s)
@@ -1607,6 +1613,16 @@ bool tcg_op_supported(TCGOpcode op)
     case INDEX_op_shrv_vec:
     case INDEX_op_sarv_vec:
         return have_vec && TCG_TARGET_HAS_shv_vec;
+    case INDEX_op_ssadd_vec:
+    case INDEX_op_usadd_vec:
+    case INDEX_op_sssub_vec:
+    case INDEX_op_ussub_vec:
+        return have_vec && TCG_TARGET_HAS_sat_vec;
+    case INDEX_op_smin_vec:
+    case INDEX_op_umin_vec:
+    case INDEX_op_smax_vec:
+    case INDEX_op_umax_vec:
+        return have_vec && TCG_TARGET_HAS_minmax_vec;
 
     default:
         tcg_debug_assert(op > INDEX_op_last_generic && op < NB_OPS);
@@ -3828,6 +3844,23 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
         tcg_dump_ops(s, false);
         qemu_log("\n");
         qemu_log_unlock();
+    }
+#endif
+
+#ifdef CONFIG_DEBUG_TCG
+    /* Ensure all labels referenced have been emitted.  */
+    {
+        TCGLabel *l;
+        bool error = false;
+
+        QSIMPLEQ_FOREACH(l, &s->labels, next) {
+            if (unlikely(!l->present) && l->refs) {
+                qemu_log_mask(CPU_LOG_TB_OP,
+                              "$L%d referenced but not present.\n", l->id);
+                error = true;
+            }
+        }
+        assert(!error);
     }
 #endif
 

@@ -53,7 +53,6 @@
 #include "hw/ppc/mac.h"
 #include "hw/input/adb.h"
 #include "hw/ppc/mac_dbdma.h"
-#include "hw/timer/m48t59.h"
 #include "hw/pci/pci.h"
 #include "net/net.h"
 #include "sysemu/sysemu.h"
@@ -165,7 +164,7 @@ static void ppc_core99_init(MachineState *machine)
 
     /* Load OpenBIOS (ELF) */
     if (filename) {
-        bios_size = load_elf(filename, NULL, NULL, NULL,
+        bios_size = load_elf(filename, NULL, NULL, NULL, NULL,
                              NULL, NULL, 1, PPC_ELF_MACHINE, 0, 0);
 
         g_free(filename);
@@ -188,7 +187,8 @@ static void ppc_core99_init(MachineState *machine)
 #endif
         kernel_base = KERNEL_LOAD_ADDR;
 
-        kernel_size = load_elf(kernel_filename, translate_kernel_address, NULL,
+        kernel_size = load_elf(kernel_filename, NULL,
+                               translate_kernel_address, NULL,
                                NULL, &lowaddr, NULL, 1, PPC_ELF_MACHINE,
                                0, 0);
         if (kernel_size < 0)
@@ -432,7 +432,7 @@ static void ppc_core99_init(MachineState *machine)
     }
 
     for (i = 0; i < nb_nics; i++) {
-        pci_nic_init_nofail(&nd_table[i], pci_bus, "ne2k_pci", NULL);
+        pci_nic_init_nofail(&nd_table[i], pci_bus, "sungem", NULL);
     }
 
     /* The NewWorld NVRAM is not located in the MacIO device */

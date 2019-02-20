@@ -96,7 +96,7 @@
 
 #define MIN_RMA_SLOF            128UL
 
-#define PHANDLE_XICP            0x00001111
+#define PHANDLE_INTC            0x00001111
 
 /* These two functions implement the VCPU id numbering: one to compute them
  * all and one to identify thread 0 of a VCORE. Any change to the first one
@@ -687,14 +687,14 @@ static int spapr_populate_drmem_v2(sPAPRMachineState *spapr, void *fdt,
                                    int offset, MemoryDeviceInfoList *dimms)
 {
     MachineState *machine = MACHINE(spapr);
-    uint8_t *int_buf, *cur_index, buf_len;
+    uint8_t *int_buf, *cur_index;
     int ret;
     uint64_t lmb_size = SPAPR_MEMORY_BLOCK_SIZE;
     uint64_t addr, cur_addr, size;
     uint32_t nr_boot_lmbs = (machine->device_memory->base / lmb_size);
     uint64_t mem_end = machine->device_memory->base +
                        memory_region_size(&machine->device_memory->mr);
-    uint32_t node, nr_entries = 0;
+    uint32_t node, buf_len, nr_entries = 0;
     sPAPRDRConnector *drc;
     DrconfCellQueue *elem, *next;
     MemoryDeviceInfoList *info;
@@ -1225,9 +1225,7 @@ static void spapr_dt_hypervisor(sPAPRMachineState *spapr, void *fdt)
     }
 }
 
-static void *spapr_build_fdt(sPAPRMachineState *spapr,
-                             hwaddr rtas_addr,
-                             hwaddr rtas_size)
+static void *spapr_build_fdt(sPAPRMachineState *spapr)
 {
     MachineState *machine = MACHINE(spapr);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
@@ -1276,7 +1274,7 @@ static void *spapr_build_fdt(sPAPRMachineState *spapr,
 
     /* /interrupt controller */
     spapr->irq->dt_populate(spapr, spapr_max_server_number(spapr), fdt,
-                          PHANDLE_XICP);
+                          PHANDLE_INTC);
 
     ret = spapr_populate_memory(spapr, fdt);
     if (ret < 0) {
@@ -1296,7 +1294,7 @@ static void *spapr_build_fdt(sPAPRMachineState *spapr,
     }
 
     QLIST_FOREACH(phb, &spapr->phbs, list) {
-        ret = spapr_populate_pci_dt(phb, PHANDLE_XICP, fdt,
+        ret = spapr_populate_pci_dt(phb, PHANDLE_INTC, fdt,
                                     spapr->irq->nr_msis);
         if (ret < 0) {
             error_report("couldn't setup PCI devices in fdt");
@@ -1644,14 +1642,14 @@ static void spapr_machine_reset(void)
 
     /*
      * We place the device tree and RTAS just below either the top of the RMA,
-     * or just below 2GB, whichever is lowere, so that it can be
+     * or just below 2GB, whichever is lower, so that it can be
      * processed with 32-bit real mode code if necessary
      */
     rtas_limit = MIN(spapr->rma_size, RTAS_MAX_ADDR);
     rtas_addr = rtas_limit - RTAS_MAX_SIZE;
     fdt_addr = rtas_addr - FDT_MAX_SIZE;
 
-    fdt = spapr_build_fdt(spapr, rtas_addr, spapr->rtas_size);
+    fdt = spapr_build_fdt(spapr);
 
     spapr_load_rtas(spapr, fdt, rtas_addr);
 
@@ -1717,6 +1715,7 @@ static bool spapr_vga_init(PCIBus *pci_bus, Error **errp)
         return true;
     case VGA_STD:
     case VGA_VIRTIO:
+    case VGA_CIRRUS:
         return pci_vga_init(pci_bus) != NULL;
     default:
         error_setg(errp,
@@ -2852,11 +2851,12 @@ static void spapr_machine_init(MachineState *machine)
     if (kernel_filename) {
         uint64_t lowaddr = 0;
 
-        spapr->kernel_size = load_elf(kernel_filename, translate_kernel_address,
-                                      NULL, NULL, &lowaddr, NULL, 1,
+        spapr->kernel_size = load_elf(kernel_filename, NULL,
+                                      translate_kernel_address, NULL,
+                                      NULL, &lowaddr, NULL, 1,
                                       PPC_ELF_MACHINE, 0, 0);
         if (spapr->kernel_size == ELF_LOAD_WRONG_ENDIAN) {
-            spapr->kernel_size = load_elf(kernel_filename,
+            spapr->kernel_size = load_elf(kernel_filename, NULL,
                                           translate_kernel_address, NULL, NULL,
                                           &lowaddr, NULL, 0, PPC_ELF_MACHINE,
                                           0, 0);
@@ -2959,10 +2959,11 @@ static char *spapr_get_fw_dev_path(FWPathProvider *p, BusState *bus,
         if (spapr) {
             /*
              * Replace "channel@0/disk@0,0" with "disk@8000000000000000":
-             * We use SRP luns of the form 8000 | (bus << 8) | (id << 5) | lun
-             * in the top 16 bits of the 64-bit LUN
+             * In the top 16 bits of the 64-bit LUN, we use SRP luns of the form
+             * 0x8000 | (target << 8) | (bus << 5) | lun
+             * (see the "Logical unit addressing format" table in SAM5)
              */
-            unsigned id = 0x8000 | (d->id << 8) | d->lun;
+            unsigned id = 0x8000 | (d->id << 8) | (d->channel << 5) | d->lun;
             return g_strdup_printf("%s@%"PRIX64, qdev_fw_name(dev),
                                    (uint64_t)id << 48);
         } else if (virtio) {
@@ -3125,6 +3126,11 @@ static char *spapr_get_ic_mode(Object *obj, Error **errp)
 static void spapr_set_ic_mode(Object *obj, const char *value, Error **errp)
 {
     sPAPRMachineState *spapr = SPAPR_MACHINE(obj);
+
+    if (SPAPR_MACHINE_GET_CLASS(spapr)->legacy_irq_allocation) {
+        error_setg(errp, "This machine only uses the legacy XICS backend, don't pass ic-mode");
+        return;
+    }
 
     /* The legacy IRQ backend can not be set */
     if (strcmp(value, "xics") == 0) {
@@ -3896,7 +3902,7 @@ static ICPState *spapr_icp_get(XICSFabric *xi, int vcpu_id)
 {
     PowerPCCPU *cpu = spapr_find_cpu(vcpu_id);
 
-    return cpu ? cpu->icp : NULL;
+    return cpu ? spapr_cpu_state(cpu)->icp : NULL;
 }
 
 static void spapr_pic_print_info(InterruptStatsProvider *obj,

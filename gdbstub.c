@@ -644,50 +644,12 @@ static int memtox(char *buf, const char *mem, int len)
 
 static uint32_t gdb_get_cpu_pid(const GDBState *s, CPUState *cpu)
 {
-#ifndef CONFIG_USER_ONLY
-    gchar *path, *name = NULL;
-    Object *obj;
-    CPUClusterState *cluster;
-    uint32_t ret;
-
-    path = object_get_canonical_path(OBJECT(cpu));
-
-    if (path == NULL) {
-        /* Return the default process' PID */
-        ret = s->processes[s->process_num - 1].pid;
-        goto out;
-    }
-
-    name = object_get_canonical_path_component(OBJECT(cpu));
-    assert(name != NULL);
-
-    /*
-     * Retrieve the CPU parent path by removing the last '/' and the CPU name
-     * from the CPU canonical path.
-     */
-    path[strlen(path) - strlen(name) - 1] = '\0';
-
-    obj = object_resolve_path_type(path, TYPE_CPU_CLUSTER, NULL);
-
-    if (obj == NULL) {
-        /* Return the default process' PID */
-        ret = s->processes[s->process_num - 1].pid;
-        goto out;
-    }
-
-    cluster = CPU_CLUSTER(obj);
-    ret = cluster->cluster_id + 1;
-
-out:
-    g_free(name);
-    g_free(path);
-
-    return ret;
-
-#else
     /* TODO: In user mode, we should use the task state PID */
-    return s->processes[s->process_num - 1].pid;
-#endif
+    if (cpu->cluster_index == UNASSIGNED_CLUSTER_INDEX) {
+        /* Return the default process' PID */
+        return s->processes[s->process_num - 1].pid;
+    }
+    return cpu->cluster_index + 1;
 }
 
 static GDBProcess *gdb_get_process(const GDBState *s, uint32_t pid)
@@ -756,35 +718,6 @@ static CPUState *gdb_next_cpu_in_process(const GDBState *s, CPUState *cpu)
     return cpu;
 }
 
-static CPUState *gdb_get_cpu(const GDBState *s, uint32_t pid, uint32_t tid)
-{
-    GDBProcess *process;
-    CPUState *cpu;
-
-    if (!tid) {
-        /* 0 means any thread, we take the first one */
-        tid = 1;
-    }
-
-    cpu = find_cpu(tid);
-
-    if (cpu == NULL) {
-        return NULL;
-    }
-
-    process = gdb_get_cpu_process(s, cpu);
-
-    if (process->pid != pid) {
-        return NULL;
-    }
-
-    if (!process->attached) {
-        return NULL;
-    }
-
-    return cpu;
-}
-
 /* Return the cpu following @cpu, while ignoring unattached processes. */
 static CPUState *gdb_next_attached_cpu(const GDBState *s, CPUState *cpu)
 {
@@ -812,6 +745,49 @@ static CPUState *gdb_first_attached_cpu(const GDBState *s)
     }
 
     return cpu;
+}
+
+static CPUState *gdb_get_cpu(const GDBState *s, uint32_t pid, uint32_t tid)
+{
+    GDBProcess *process;
+    CPUState *cpu;
+
+    if (!pid && !tid) {
+        /* 0 means any process/thread, we take the first attached one */
+        return gdb_first_attached_cpu(s);
+    } else if (pid && !tid) {
+        /* any thread in a specific process */
+        process = gdb_get_process(s, pid);
+
+        if (process == NULL) {
+            return NULL;
+        }
+
+        if (!process->attached) {
+            return NULL;
+        }
+
+        return get_first_cpu_in_process(s, process);
+    } else {
+        /* a specific thread */
+        cpu = find_cpu(tid);
+
+        if (cpu == NULL) {
+            return NULL;
+        }
+
+        process = gdb_get_cpu_process(s, cpu);
+
+        if (pid && process->pid != pid) {
+            return NULL;
+        }
+
+        if (!process->attached) {
+            return NULL;
+        }
+
+        return cpu;
+    }
 }
 
 static const char *get_feature_xml(const GDBState *s, const char *p,
@@ -1383,6 +1359,11 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
 
             put_packet(s, buf);
             break;
+        } else if (strncmp(p, "Kill;", 5) == 0) {
+            /* Kill the target */
+            put_packet(s, "OK");
+            error_report("QEMU: Terminated via GDBstub");
+            exit(0);
         } else {
             goto unknown_command;
         }
@@ -2551,7 +2532,7 @@ int gdbserver_start(const char *device)
          * FIXME: it's a bit weird to allow using a mux chardev here
          * and implicitly setup a monitor. We may want to break this.
          */
-        chr = qemu_chr_new_noreplay("gdb", device, true);
+        chr = qemu_chr_new_noreplay("gdb", device, true, NULL);
         if (!chr)
             return -1;
     }
@@ -2565,7 +2546,7 @@ int gdbserver_start(const char *device)
 
         /* Initialize a monitor terminal for gdb */
         mon_chr = qemu_chardev_new(NULL, TYPE_CHARDEV_GDB,
-                                   NULL, &error_abort);
+                                   NULL, NULL, &error_abort);
         monitor_init(mon_chr, 0);
     } else {
         qemu_chr_fe_deinit(&s->chr, true);
