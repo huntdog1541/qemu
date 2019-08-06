@@ -7,10 +7,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/module.h"
 #include "qemu/option.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block-core.h"
-#include "qapi/qapi-commands-misc.h"
+#include "qapi/qapi-commands-qom.h"
 #include "qapi/qapi-visit-block-core.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/visitor.h"
@@ -51,10 +52,24 @@ static void xen_block_connect(XenDevice *xendev, Error **errp)
     XenBlockDevice *blockdev = XEN_BLOCK_DEVICE(xendev);
     const char *type = object_get_typename(OBJECT(blockdev));
     XenBlockVdev *vdev = &blockdev->props.vdev;
+    BlockConf *conf = &blockdev->props.conf;
+    unsigned int feature_large_sector_size;
     unsigned int order, nr_ring_ref, *ring_ref, event_channel, protocol;
     char *str;
 
     trace_xen_block_connect(type, vdev->disk, vdev->partition);
+
+    if (xen_device_frontend_scanf(xendev, "feature-large-sector-size", "%u",
+                                  &feature_large_sector_size) != 1) {
+        feature_large_sector_size = 0;
+    }
+
+    if (feature_large_sector_size != 1 &&
+        conf->logical_block_size != XEN_BLKIF_SECTOR_SIZE) {
+        error_setg(errp, "logical_block_size != %u not supported by frontend",
+                   XEN_BLKIF_SECTOR_SIZE);
+        return;
+    }
 
     if (xen_device_frontend_scanf(xendev, "ring-page-order", "%u",
                                   &order) != 1) {
@@ -184,6 +199,7 @@ static void xen_block_realize(XenDevice *xendev, Error **errp)
     const char *type = object_get_typename(OBJECT(blockdev));
     XenBlockVdev *vdev = &blockdev->props.vdev;
     BlockConf *conf = &blockdev->props.conf;
+    BlockBackend *blk = conf->blk;
     Error *local_err = NULL;
 
     if (vdev->type == XEN_BLOCK_VDEV_TYPE_INVALID) {
@@ -205,8 +221,8 @@ static void xen_block_realize(XenDevice *xendev, Error **errp)
      * The blkif protocol does not deal with removable media, so it must
      * always be present, even for CDRom devices.
      */
-    assert(conf->blk);
-    if (!blk_is_inserted(conf->blk)) {
+    assert(blk);
+    if (!blk_is_inserted(blk)) {
         error_setg(errp, "device needs media, but drive is empty");
         return;
     }
@@ -229,11 +245,17 @@ static void xen_block_realize(XenDevice *xendev, Error **errp)
         return;
     }
 
-    blk_set_dev_ops(conf->blk, &xen_block_dev_ops, blockdev);
-    blk_set_guest_block_size(conf->blk, conf->logical_block_size);
+    blk_set_dev_ops(blk, &xen_block_dev_ops, blockdev);
+    blk_set_guest_block_size(blk, conf->logical_block_size);
 
-    if (conf->discard_granularity > 0) {
+    if (conf->discard_granularity == -1) {
+        conf->discard_granularity = conf->physical_block_size;
+    }
+
+    if (blk_get_flags(blk) & BDRV_O_UNMAP) {
         xen_device_backend_printf(xendev, "feature-discard", "%u", 1);
+        xen_device_backend_printf(xendev, "discard-granularity", "%u",
+                                  conf->discard_granularity);
     }
 
     xen_device_backend_printf(xendev, "feature-flush-cache", "%u", 1);
@@ -252,7 +274,8 @@ static void xen_block_realize(XenDevice *xendev, Error **errp)
     xen_block_set_size(blockdev);
 
     blockdev->dataplane =
-        xen_block_dataplane_create(xendev, conf, blockdev->props.iothread);
+        xen_block_dataplane_create(xendev, blk, conf->logical_block_size,
+                                   blockdev->props.iothread);
 }
 
 static void xen_block_frontend_changed(XenDevice *xendev,
@@ -351,21 +374,28 @@ static void xen_block_get_vdev(Object *obj, Visitor *v, const char *name,
     g_free(str);
 }
 
-static unsigned int vbd_name_to_disk(const char *name, const char **endp)
+static int vbd_name_to_disk(const char *name, const char **endp,
+                            unsigned long *disk)
 {
-    unsigned int disk = 0;
+    unsigned int n = 0;
 
     while (*name != '\0') {
         if (!g_ascii_isalpha(*name) || !g_ascii_islower(*name)) {
             break;
         }
 
-        disk *= 26;
-        disk += *name++ - 'a' + 1;
+        n *= 26;
+        n += *name++ - 'a' + 1;
     }
     *endp = name;
 
-    return disk - 1;
+    if (!n) {
+        return -1;
+    }
+
+    *disk = n - 1;
+
+    return 0;
 }
 
 static void xen_block_set_vdev(Object *obj, Visitor *v, const char *name,
@@ -413,13 +443,14 @@ static void xen_block_set_vdev(Object *obj, Visitor *v, const char *name,
         }
 
         if (*end == 'p') {
-            p = (char *) ++end;
-            if (*end == '\0') {
+            if (*(++end) == '\0') {
                 goto invalid;
             }
         }
     } else {
-        vdev->disk = vbd_name_to_disk(p, &end);
+        if (vbd_name_to_disk(p, &end, &vdev->disk)) {
+            goto invalid;
+        }
     }
 
     if (*end != '\0') {
@@ -589,7 +620,7 @@ static void xen_cdrom_realize(XenBlockDevice *blockdev, Error **errp)
         int rc;
 
         /* Set up an empty drive */
-        conf->blk = blk_new(0, BLK_PERM_ALL);
+        conf->blk = blk_new(qemu_get_aio_context(), 0, BLK_PERM_ALL);
 
         rc = blk_attach_dev(conf->blk, DEVICE(blockdev));
         if (!rc) {
@@ -735,21 +766,23 @@ static XenBlockDrive *xen_block_drive_create(const char *id,
         }
 
         g_strfreev(v);
-    }
-
-    if (!filename) {
-        error_setg(errp, "no filename");
+    } else {
+        error_setg(errp, "no params");
         goto done;
     }
+
+    assert(filename);
     assert(driver);
 
     drive = g_new0(XenBlockDrive, 1);
     drive->id = g_strdup(id);
 
     file_layer = qdict_new();
+    driver_layer = qdict_new();
 
     qdict_put_str(file_layer, "driver", "file");
     qdict_put_str(file_layer, "filename", filename);
+    g_free(filename);
 
     if (mode && *mode != 'w') {
         qdict_put_bool(file_layer, "read-only", true);
@@ -762,7 +795,7 @@ static XenBlockDrive *xen_block_drive_create(const char *id,
             QDict *cache_qdict = qdict_new();
 
             qdict_put_bool(cache_qdict, "direct", true);
-            qdict_put_obj(file_layer, "cache", QOBJECT(cache_qdict));
+            qdict_put(file_layer, "cache", cache_qdict);
 
             qdict_put_str(file_layer, "aio", "native");
         }
@@ -773,6 +806,7 @@ static XenBlockDrive *xen_block_drive_create(const char *id,
 
         if (!qemu_strtoul(discard_enable, NULL, 2, &value) && !!value) {
             qdict_put_str(file_layer, "discard", "unmap");
+            qdict_put_str(driver_layer, "discard", "unmap");
         }
     }
 
@@ -782,19 +816,18 @@ static XenBlockDrive *xen_block_drive_create(const char *id,
      */
     qdict_put_str(file_layer, "locking", "off");
 
-    driver_layer = qdict_new();
-
     qdict_put_str(driver_layer, "driver", driver);
-    qdict_put_obj(driver_layer, "file", QOBJECT(file_layer));
+    g_free(driver);
+
+    qdict_put(driver_layer, "file", file_layer);
 
     g_assert(!drive->node_name);
     drive->node_name = xen_block_blockdev_add(drive->id, driver_layer,
                                               &local_err);
 
-done:
-    g_free(driver);
-    g_free(filename);
+    qobject_unref(driver_layer);
 
+done:
     if (local_err) {
         error_propagate(errp, local_err);
         xen_block_drive_destroy(drive, NULL);

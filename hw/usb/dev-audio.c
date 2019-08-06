@@ -30,7 +30,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "hw/usb.h"
 #include "desc.h"
 #include "hw/hw.h"
@@ -650,7 +650,7 @@ static void usb_audio_realize(USBDevice *dev, Error **errp)
     s->out.vol[1]        = 240; /* 0 dB */
     s->out.as.freq       = USBAUDIO_SAMPLE_RATE;
     s->out.as.nchannels  = 2;
-    s->out.as.fmt        = AUD_FMT_S16;
+    s->out.as.fmt        = AUDIO_FORMAT_S16;
     s->out.as.endianness = 0;
     streambuf_init(&s->out.buf, s->buffer);
 

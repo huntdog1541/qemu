@@ -49,7 +49,6 @@ struct XenBlockDataPlane {
     unsigned int *ring_ref;
     unsigned int nr_ring_ref;
     void *sring;
-    int64_t file_blk;
     int protocol;
     blkif_back_rings_t rings;
     int more_work;
@@ -59,6 +58,7 @@ struct XenBlockDataPlane {
     int requests_inflight;
     unsigned int max_requests;
     BlockBackend *blk;
+    unsigned int sector_size;
     QEMUBH *bh;
     IOThread *iothread;
     AioContext *ctx;
@@ -168,7 +168,7 @@ static int xen_block_parse_request(XenBlockRequest *request)
         goto err;
     }
 
-    request->start = request->req.sector_number * dataplane->file_blk;
+    request->start = request->req.sector_number * dataplane->sector_size;
     for (i = 0; i < request->req.nr_segments; i++) {
         if (i == BLKIF_MAX_SEGMENTS_PER_REQUEST) {
             error_report("error: nr_segments too big");
@@ -178,14 +178,14 @@ static int xen_block_parse_request(XenBlockRequest *request)
             error_report("error: first > last sector");
             goto err;
         }
-        if (request->req.seg[i].last_sect * dataplane->file_blk >=
+        if (request->req.seg[i].last_sect * dataplane->sector_size >=
             XC_PAGE_SIZE) {
             error_report("error: page crossing");
             goto err;
         }
 
         len = (request->req.seg[i].last_sect -
-               request->req.seg[i].first_sect + 1) * dataplane->file_blk;
+               request->req.seg[i].first_sect + 1) * dataplane->sector_size;
         request->size += len;
     }
     if (request->start + request->size > blk_getlength(dataplane->blk)) {
@@ -205,7 +205,6 @@ static int xen_block_copy_request(XenBlockRequest *request)
     XenDevice *xendev = dataplane->xendev;
     XenDeviceGrantCopySegment segs[BLKIF_MAX_SEGMENTS_PER_REQUEST];
     int i, count;
-    int64_t file_blk = dataplane->file_blk;
     bool to_domain = (request->req.operation == BLKIF_OP_READ);
     void *virt = request->buf;
     Error *local_err = NULL;
@@ -220,16 +219,17 @@ static int xen_block_copy_request(XenBlockRequest *request)
         if (to_domain) {
             segs[i].dest.foreign.ref = request->req.seg[i].gref;
             segs[i].dest.foreign.offset = request->req.seg[i].first_sect *
-                file_blk;
+                dataplane->sector_size;
             segs[i].source.virt = virt;
         } else {
             segs[i].source.foreign.ref = request->req.seg[i].gref;
             segs[i].source.foreign.offset = request->req.seg[i].first_sect *
-                file_blk;
+                dataplane->sector_size;
             segs[i].dest.virt = virt;
         }
         segs[i].len = (request->req.seg[i].last_sect -
-                       request->req.seg[i].first_sect + 1) * file_blk;
+                       request->req.seg[i].first_sect + 1) *
+                      dataplane->sector_size;
         virt += segs[i].len;
     }
 
@@ -281,10 +281,6 @@ static void xen_block_complete_aio(void *opaque, int ret)
         break;
     case BLKIF_OP_WRITE:
     case BLKIF_OP_FLUSH_DISKCACHE:
-        if (!request->req.nr_segments) {
-            break;
-        }
-        break;
     default:
         break;
     }
@@ -298,6 +294,7 @@ static void xen_block_complete_aio(void *opaque, int ret)
         if (!request->req.nr_segments) {
             break;
         }
+        /* fall through */
     case BLKIF_OP_READ:
         if (request->status == BLKIF_RSP_OKAY) {
             block_acct_done(blk_get_stats(dataplane->blk), &request->acct);
@@ -321,7 +318,9 @@ static void xen_block_complete_aio(void *opaque, int ret)
     }
     xen_block_release_request(request);
 
-    qemu_bh_schedule(dataplane->bh);
+    if (dataplane->more_work) {
+        qemu_bh_schedule(dataplane->bh);
+    }
 
 done:
     aio_context_release(dataplane->ctx);
@@ -334,22 +333,22 @@ static bool xen_block_split_discard(XenBlockRequest *request,
     XenBlockDataPlane *dataplane = request->dataplane;
     int64_t byte_offset;
     int byte_chunk;
-    uint64_t byte_remaining, limit;
+    uint64_t byte_remaining;
     uint64_t sec_start = sector_number;
     uint64_t sec_count = nr_sectors;
 
     /* Wrap around, or overflowing byte limit? */
     if (sec_start + sec_count < sec_count ||
-        sec_start + sec_count > INT64_MAX / dataplane->file_blk) {
+        sec_start + sec_count > INT64_MAX / dataplane->sector_size) {
         return false;
     }
 
-    limit = BDRV_REQUEST_MAX_SECTORS * dataplane->file_blk;
-    byte_offset = sec_start * dataplane->file_blk;
-    byte_remaining = sec_count * dataplane->file_blk;
+    byte_offset = sec_start * dataplane->sector_size;
+    byte_remaining = sec_count * dataplane->sector_size;
 
     do {
-        byte_chunk = byte_remaining > limit ? limit : byte_remaining;
+        byte_chunk = byte_remaining > BDRV_REQUEST_MAX_BYTES ?
+            BDRV_REQUEST_MAX_BYTES : byte_remaining;
         request->aio_inflight++;
         blk_aio_pdiscard(dataplane->blk, byte_offset, byte_chunk,
                          xen_block_complete_aio, request);
@@ -518,12 +517,13 @@ static int xen_block_get_request(XenBlockDataPlane *dataplane,
  */
 #define IO_PLUG_THRESHOLD 1
 
-static void xen_block_handle_requests(XenBlockDataPlane *dataplane)
+static bool xen_block_handle_requests(XenBlockDataPlane *dataplane)
 {
     RING_IDX rc, rp;
     XenBlockRequest *request;
     int inflight_atstart = dataplane->requests_inflight;
     int batched = 0;
+    bool done_something = false;
 
     dataplane->more_work = 0;
 
@@ -555,6 +555,7 @@ static void xen_block_handle_requests(XenBlockDataPlane *dataplane)
         }
         xen_block_get_request(dataplane, request, rc);
         dataplane->rings.common.req_cons = ++rc;
+        done_something = true;
 
         /* parse them */
         if (xen_block_parse_request(request) != 0) {
@@ -606,10 +607,7 @@ static void xen_block_handle_requests(XenBlockDataPlane *dataplane)
         blk_io_unplug(dataplane->blk);
     }
 
-    if (dataplane->more_work &&
-        dataplane->requests_inflight < dataplane->max_requests) {
-        qemu_bh_schedule(dataplane->bh);
-    }
+    return done_something;
 }
 
 static void xen_block_dataplane_bh(void *opaque)
@@ -621,22 +619,23 @@ static void xen_block_dataplane_bh(void *opaque)
     aio_context_release(dataplane->ctx);
 }
 
-static void xen_block_dataplane_event(void *opaque)
+static bool xen_block_dataplane_event(void *opaque)
 {
     XenBlockDataPlane *dataplane = opaque;
 
-    qemu_bh_schedule(dataplane->bh);
+    return xen_block_handle_requests(dataplane);
 }
 
 XenBlockDataPlane *xen_block_dataplane_create(XenDevice *xendev,
-                                              BlockConf *conf,
+                                              BlockBackend *blk,
+                                              unsigned int sector_size,
                                               IOThread *iothread)
 {
     XenBlockDataPlane *dataplane = g_new0(XenBlockDataPlane, 1);
 
     dataplane->xendev = xendev;
-    dataplane->file_blk = conf->logical_block_size;
-    dataplane->blk = conf->blk;
+    dataplane->blk = blk;
+    dataplane->sector_size = sector_size;
 
     QLIST_INIT(&dataplane->inflight);
     QLIST_INIT(&dataplane->freelist);
@@ -687,7 +686,8 @@ void xen_block_dataplane_stop(XenBlockDataPlane *dataplane)
     }
 
     aio_context_acquire(dataplane->ctx);
-    blk_set_aio_context(dataplane->blk, qemu_get_aio_context());
+    /* Xen doesn't have multiple users for nodes, so this can't fail */
+    blk_set_aio_context(dataplane->blk, qemu_get_aio_context(), &error_abort);
     aio_context_release(dataplane->ctx);
 
     xendev = dataplane->xendev;
@@ -807,7 +807,7 @@ void xen_block_dataplane_start(XenBlockDataPlane *dataplane,
     }
 
     dataplane->event_channel =
-        xen_device_bind_event_channel(xendev, event_channel,
+        xen_device_bind_event_channel(xendev, dataplane->ctx, event_channel,
                                       xen_block_dataplane_event, dataplane,
                                       &local_err);
     if (local_err) {
@@ -816,7 +816,8 @@ void xen_block_dataplane_start(XenBlockDataPlane *dataplane,
     }
 
     aio_context_acquire(dataplane->ctx);
-    blk_set_aio_context(dataplane->blk, dataplane->ctx);
+    /* If other users keep the BlockBackend in the iothread, that's ok */
+    blk_set_aio_context(dataplane->blk, dataplane->ctx, NULL);
     aio_context_release(dataplane->ctx);
     return;
 

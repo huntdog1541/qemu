@@ -198,7 +198,7 @@ supported_kvm_target() {
         i386:i386 | i386:x86_64 | i386:x32 | \
         x86_64:i386 | x86_64:x86_64 | x86_64:x32 | \
         mips:mips | mipsel:mips | \
-        ppc:ppc | ppc64:ppc | ppc:ppc64 | ppc64:ppc64 | \
+        ppc:ppc | ppc64:ppc | ppc:ppc64 | ppc64:ppc64 | ppc64:ppc64le | \
         s390x:s390x)
             return 0
         ;;
@@ -276,8 +276,15 @@ ld_has() {
     $ld --help 2>/dev/null | grep ".$1" >/dev/null 2>&1
 }
 
+# make source path absolute
+source_path=$(cd "$(dirname -- "$0")"; pwd)
+
+if printf %s\\n "$source_path" "$PWD" | grep -q "[[:space:]:]";
+then
+  error_exit "main directory cannot contain spaces nor colons"
+fi
+
 # default parameters
-source_path=$(dirname "$0")
 cpu=""
 iasl="iasl"
 interp_prefix="/usr/gnemul/qemu-%M"
@@ -287,6 +294,7 @@ audio_drv_list=""
 block_drv_rw_whitelist=""
 block_drv_ro_whitelist=""
 host_cc="cc"
+libs_cpu=""
 libs_softmmu=""
 libs_tools=""
 audio_pt_int=""
@@ -315,7 +323,7 @@ else
         echo "to acquire QEMU source archives. Non-GIT builds are only"
         echo "supported with source archives linked from:"
         echo
-        echo "  https://www.qemu.org/download/"
+        echo "  https://www.qemu.org/download/#source"
         echo
         echo "Developers working with GIT can use scripts/archive-source.sh"
         echo "if they need to create valid source archives."
@@ -327,6 +335,7 @@ git="git"
 
 # Don't accept a target_list environment variable.
 unset target_list
+unset target_list_exclude
 
 # Default value for a variable defining feature "foo".
 #  * foo="no"  feature will only be used if --enable-foo arg is given
@@ -368,10 +377,10 @@ libattr=""
 xfs=""
 tcg="yes"
 membarrier=""
-vhost_net="no"
-vhost_crypto="no"
-vhost_scsi="no"
-vhost_vsock="no"
+vhost_net=""
+vhost_crypto=""
+vhost_scsi=""
+vhost_vsock=""
 vhost_user=""
 kvm="no"
 hax="no"
@@ -406,7 +415,7 @@ includedir="\${prefix}/include"
 sysconfdir="\${prefix}/etc"
 local_statedir="\${prefix}/var"
 confsuffix="/qemu"
-slirp="yes"
+slirp=""
 oss_lib=""
 bsd="no"
 linux="no"
@@ -456,6 +465,8 @@ glusterfs_xlator_opt="no"
 glusterfs_discard="no"
 glusterfs_fallocate="no"
 glusterfs_zerofill="no"
+glusterfs_ftruncate_has_stat="no"
+glusterfs_iocb_has_stat="no"
 gtk=""
 gtk_gl="no"
 tls_priority="NORMAL"
@@ -463,10 +474,11 @@ gnutls=""
 nettle=""
 gcrypt=""
 gcrypt_hmac="no"
+auth_pam=""
 vte=""
 virglrenderer=""
-tpm="yes"
-libssh2=""
+tpm=""
+libssh=""
 live_block_migration="yes"
 numa=""
 tcmalloc="no"
@@ -486,7 +498,7 @@ libxml2=""
 docker="no"
 debug_mutex="no"
 libpmem=""
-libudev="no"
+default_devices="yes"
 
 # cross compilers defaults, can be overridden with --cross-cc-ARCH
 cross_cc_aarch64="aarch64-linux-gnu-gcc"
@@ -496,8 +508,11 @@ cross_cc_arm="arm-linux-gnueabihf-gcc"
 cross_cc_cflags_armeb="-mbig-endian"
 cross_cc_i386="i386-pc-linux-gnu-gcc"
 cross_cc_cflags_i386=""
-cross_cc_powerpc="powerpc-linux-gnu-gcc"
-cross_cc_powerpc="powerpc-linux-gnu-gcc"
+cross_cc_ppc="powerpc-linux-gnu-gcc"
+cross_cc_cflags_ppc="-m32"
+cross_cc_ppc64="powerpc-linux-gnu-gcc"
+cross_cc_cflags_ppc64="-m64"
+cross_cc_ppc64le="powerpc64le-linux-gnu-gcc"
 
 enabled_cross_compilers=""
 
@@ -515,8 +530,6 @@ for opt do
   --cc=*) CC="$optarg"
   ;;
   --cxx=*) CXX="$optarg"
-  ;;
-  --source-path=*) source_path="$optarg"
   ;;
   --cpu=*) cpu="$optarg"
   ;;
@@ -595,9 +608,6 @@ if test "$debug_info" = "yes"; then
     CFLAGS="-g $CFLAGS"
     LDFLAGS="-g $LDFLAGS"
 fi
-
-# make source path absolute
-source_path=$(cd "$source_path"; pwd)
 
 # running configure in the source tree?
 # we know that's the case if configure is there.
@@ -699,7 +709,11 @@ elif check_define __sparc__ ; then
   fi
 elif check_define _ARCH_PPC ; then
   if check_define _ARCH_PPC64 ; then
-    cpu="ppc64"
+    if check_define _LITTLE_ENDIAN ; then
+      cpu="ppc64le"
+    else
+      cpu="ppc64"
+    fi
   else
     cpu="ppc"
   fi
@@ -730,9 +744,13 @@ ARCH=
 # Note that this case should only have supported host CPUs, not guests.
 case "$cpu" in
   ppc|ppc64|s390|s390x|sparc64|x32|riscv32|riscv64)
-    cpu="$cpu"
     supported_cpu="yes"
     eval "cross_cc_${cpu}=\$host_cc"
+  ;;
+  ppc64le)
+    ARCH="ppc64"
+    supported_cpu="yes"
+    cross_cc_ppc64le=$host_cc
   ;;
   i386|i486|i586|i686|i86pc|BePC)
     cpu="i386"
@@ -782,6 +800,7 @@ case $targetos in
 MINGW32*)
   mingw32="yes"
   hax="yes"
+  vhost_user="no"
   audio_possible_drivers="dsound sdl"
   if check_include dsound.h; then
     audio_drv_list="dsound"
@@ -878,15 +897,11 @@ Haiku)
   LIBS="-lposix_error_mapper -lnetwork $LIBS"
 ;;
 Linux)
-  audio_drv_list="try-pa try-alsa try-sdl oss"
+  audio_drv_list="try-pa oss"
   audio_possible_drivers="oss alsa sdl pa"
   linux="yes"
   linux_user="yes"
   kvm="yes"
-  vhost_net="yes"
-  vhost_crypto="yes"
-  vhost_scsi="yes"
-  vhost_vsock="yes"
   QEMU_INCLUDES="-I\$(SRC_PATH)/linux-headers -I$PWD/linux-headers $QEMU_INCLUDES"
   supported_os="yes"
   libudev="yes"
@@ -901,7 +916,18 @@ fi
 
 : ${make=${MAKE-make}}
 : ${install=${INSTALL-install}}
-: ${python=${PYTHON-python}}
+# We prefer python 3.x. A bare 'python' is traditionally
+# python 2.x, but some distros have it as python 3.x, so
+# we check that before python2
+python=
+for binary in "${PYTHON-python3}" python python2
+do
+    if has "$binary"
+    then
+        python="$binary"
+        break
+    fi
+done
 : ${smbd=${SMBD-/usr/sbin/smbd}}
 
 # Default objcc to clang if available, otherwise use CC
@@ -944,8 +970,6 @@ for opt do
   --prefix=*) prefix="$optarg"
   ;;
   --interp-prefix=*) interp_prefix="$optarg"
-  ;;
-  --source-path=*)
   ;;
   --cross-prefix=*)
   ;;
@@ -990,6 +1014,14 @@ for opt do
   --cpu=*)
   ;;
   --target-list=*) target_list="$optarg"
+                   if test "$target_list_exclude"; then
+                       error_exit "Can't mix --target-list with --target-list-exclude"
+                   fi
+  ;;
+  --target-list-exclude=*) target_list_exclude="$optarg"
+                   if test "$target_list"; then
+                       error_exit "Can't mix --target-list-exclude with --target-list"
+                   fi
   ;;
   --enable-trace-backends=*) trace_backends="$optarg"
   ;;
@@ -997,6 +1029,10 @@ for opt do
   --enable-trace-backend=*) trace_backends="$optarg"
   ;;
   --with-trace-file=*) trace_file="$optarg"
+  ;;
+  --with-default-devices) default_devices="yes"
+  ;;
+  --without-default-devices) default_devices="no"
   ;;
   --enable-gprof) gprof="yes"
   ;;
@@ -1107,6 +1143,10 @@ for opt do
   ;;
   --disable-slirp) slirp="no"
   ;;
+  --enable-slirp=git) slirp="git"
+  ;;
+  --enable-slirp=system) slirp="system"
+  ;;
   --disable-vde) vde="no"
   ;;
   --enable-vde) vde="yes"
@@ -1216,6 +1256,10 @@ for opt do
   ;;
   --enable-curses) curses="yes"
   ;;
+  --disable-iconv) iconv="no"
+  ;;
+  --enable-iconv) iconv="yes"
+  ;;
   --disable-curl) curl="no"
   ;;
   --enable-curl) curl="yes"
@@ -1262,11 +1306,7 @@ for opt do
   ;;
   --disable-vhost-crypto) vhost_crypto="no"
   ;;
-  --enable-vhost-crypto)
-      vhost_crypto="yes"
-      if test "$mingw32" = "yes"; then
-          error_exit "vhost-crypto isn't available on win32"
-      fi
+  --enable-vhost-crypto) vhost_crypto="yes"
   ;;
   --disable-vhost-scsi) vhost_scsi="no"
   ;;
@@ -1381,6 +1421,10 @@ for opt do
   ;;
   --enable-gcrypt) gcrypt="yes"
   ;;
+  --disable-auth-pam) auth_pam="no"
+  ;;
+  --enable-auth-pam) auth_pam="yes"
+  ;;
   --enable-rdma) rdma="yes"
   ;;
   --disable-rdma) rdma="no"
@@ -1401,9 +1445,9 @@ for opt do
   ;;
   --enable-tpm) tpm="yes"
   ;;
-  --disable-libssh2) libssh2="no"
+  --disable-libssh) libssh="no"
   ;;
-  --enable-libssh2) libssh2="yes"
+  --enable-libssh) libssh="yes"
   ;;
   --disable-live-block-migration) live_block_migration="no"
   ;;
@@ -1471,11 +1515,11 @@ for opt do
   ;;
   --disable-vhost-user) vhost_user="no"
   ;;
-  --enable-vhost-user)
-      vhost_user="yes"
-      if test "$mingw32" = "yes"; then
-          error_exit "vhost-user isn't available on win32"
-      fi
+  --enable-vhost-user) vhost_user="yes"
+  ;;
+  --disable-vhost-kernel) vhost_kernel="no"
+  ;;
+  --enable-vhost-kernel) vhost_kernel="yes"
   ;;
   --disable-capstone) capstone="no"
   ;;
@@ -1507,56 +1551,48 @@ for opt do
   esac
 done
 
-if test "$vhost_user" = ""; then
-    if test "$mingw32" = "yes"; then
-        vhost_user="no"
-    else
-        vhost_user="yes"
-    fi
-fi
-
 case "$cpu" in
     ppc)
            CPU_CFLAGS="-m32"
            LDFLAGS="-m32 $LDFLAGS"
-           cross_cc_powerpc=$cc
-           cross_cc_cflags_powerpc=$CPU_CFLAGS
+           cross_cc_ppc=$cc
+           cross_cc_cflags_ppc="$CPU_CFLAGS"
            ;;
     ppc64)
            CPU_CFLAGS="-m64"
            LDFLAGS="-m64 $LDFLAGS"
            cross_cc_ppc64=$cc
-           cross_cc_cflags_ppc64=$CPU_CFLAGS
+           cross_cc_cflags_ppc64="$CPU_CFLAGS"
            ;;
     sparc)
            CPU_CFLAGS="-m32 -mv8plus -mcpu=ultrasparc"
            LDFLAGS="-m32 -mv8plus $LDFLAGS"
            cross_cc_sparc=$cc
-           cross_cc_cflags_sparc=$CPU_CFLAGS
+           cross_cc_cflags_sparc="$CPU_CFLAGS"
            ;;
     sparc64)
            CPU_CFLAGS="-m64 -mcpu=ultrasparc"
            LDFLAGS="-m64 $LDFLAGS"
            cross_cc_sparc64=$cc
-           cross_cc_cflags_sparc64=$CPU_CFLAGS
+           cross_cc_cflags_sparc64="$CPU_CFLAGS"
            ;;
     s390)
            CPU_CFLAGS="-m31"
            LDFLAGS="-m31 $LDFLAGS"
            cross_cc_s390=$cc
-           cross_cc_cflags_s390=$CPU_CFLAGS
+           cross_cc_cflags_s390="$CPU_CFLAGS"
            ;;
     s390x)
            CPU_CFLAGS="-m64"
            LDFLAGS="-m64 $LDFLAGS"
            cross_cc_s390x=$cc
-           cross_cc_cflags_s390x=$CPU_CFLAGS
+           cross_cc_cflags_s390x="$CPU_CFLAGS"
            ;;
     i386)
            CPU_CFLAGS="-m32"
            LDFLAGS="-m32 $LDFLAGS"
            cross_cc_i386=$cc
-           cross_cc_cflags_i386=$CPU_CFLAGS
+           cross_cc_cflags_i386="$CPU_CFLAGS"
            ;;
     x86_64)
            # ??? Only extremely old AMD cpus do not have cmpxchg16b.
@@ -1565,13 +1601,13 @@ case "$cpu" in
            CPU_CFLAGS="-m64 -mcx16"
            LDFLAGS="-m64 $LDFLAGS"
            cross_cc_x86_64=$cc
-           cross_cc_cflags_x86_64=$CPU_CFLAGS
+           cross_cc_cflags_x86_64="$CPU_CFLAGS"
            ;;
     x32)
            CPU_CFLAGS="-mx32"
            LDFLAGS="-mx32 $LDFLAGS"
            cross_cc_i386=$cc
-           cross_cc_cflags_i386=$CPU_CFLAGS
+           cross_cc_cflags_i386="$CPU_CFLAGS"
            ;;
     # No special flags required for other host CPUs
 esac
@@ -1599,9 +1635,26 @@ if [ "$bsd_user" = "yes" ]; then
     mak_wilds="${mak_wilds} $source_path/default-configs/*-bsd-user.mak"
 fi
 
-for config in $mak_wilds; do
-    default_target_list="${default_target_list} $(basename "$config" .mak)"
-done
+if test -z "$target_list_exclude"; then
+    for config in $mak_wilds; do
+        default_target_list="${default_target_list} $(basename "$config" .mak)"
+    done
+else
+    exclude_list=$(echo "$target_list_exclude" | sed -e 's/,/ /g')
+    for config in $mak_wilds; do
+        target="$(basename "$config" .mak)"
+        exclude="no"
+        for excl in $exclude_list; do
+            if test "$excl" = "$target"; then
+                exclude="yes"
+                break;
+            fi
+        done
+        if test "$exclude" = "no"; then
+            default_target_list="${default_target_list} $target"
+        fi
+    done
+fi
 
 # Enumerate public trace backends for --help output
 trace_backend_list=$(echo $(grep -le '^PUBLIC = True$' "$source_path"/scripts/tracetool/backend/*.py | sed -e 's/^.*\/\(.*\)\.py$/\1/'))
@@ -1620,9 +1673,9 @@ Standard options:
   --target-list=LIST       set target list (default: build everything)
 $(echo Available targets: $default_target_list | \
   fold -s -w 53 | sed -e 's/^/                           /')
+  --target-list-exclude=LIST exclude a set of targets from the default target-list
 
 Advanced options (experts only):
-  --source-path=PATH       path of source code [$source_path]
   --cross-prefix=PREFIX    use PREFIX for compile tools [$cross_prefix]
   --cc=CC                  use C compiler CC [$cc]
   --iasl=IASL              use ACPI compiler IASL [$iasl]
@@ -1699,7 +1752,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   guest-agent     build the QEMU Guest Agent
   guest-agent-msi build guest agent Windows MSI installation package
   pie             Position Independent Executables
-  modules         modules support
+  modules         modules support (non-Windows)
   debug-tcg       TCG debugging (default is disabled)
   debug-info      debugging information
   sparse          sparse checker
@@ -1707,11 +1760,13 @@ disabled with --disable-FEATURE, default is enabled if available:
   gnutls          GNUTLS cryptography support
   nettle          nettle cryptography support
   gcrypt          libgcrypt cryptography support
+  auth-pam        PAM access control
   sdl             SDL UI
-  sdl_image       SDL Image support for icons
+  sdl-image       SDL Image support for icons
   gtk             gtk UI
   vte             vte support for the gtk UI
   curses          curses UI
+  iconv           font glyph conversion support
   vnc             VNC UI support
   vnc-sasl        SASL encryption for VNC server
   vnc-jpeg        JPEG lossy compression for VNC server
@@ -1737,8 +1792,12 @@ disabled with --disable-FEATURE, default is enabled if available:
   linux-aio       Linux AIO support
   cap-ng          libcap-ng support
   attr            attr and xattr support
-  vhost-net       vhost-net acceleration support
-  vhost-crypto    vhost-crypto acceleration support
+  vhost-net       vhost-net kernel acceleration support
+  vhost-vsock     virtio sockets device support
+  vhost-scsi      vhost-scsi kernel target support
+  vhost-crypto    vhost-user-crypto backend support
+  vhost-kernel    vhost kernel backend support
+  vhost-user      vhost-user backend support
   spice           spice
   rbd             rados block device (rbd)
   libiscsi        iscsi support
@@ -1757,14 +1816,13 @@ disabled with --disable-FEATURE, default is enabled if available:
   coroutine-pool  coroutine freelist (better performance)
   glusterfs       GlusterFS backend
   tpm             TPM support
-  libssh2         ssh block device support
+  libssh          ssh block device support
   numa            libnuma support
   libxml2         for Parallels image format
   tcmalloc        tcmalloc support
   jemalloc        jemalloc support
   avx2            AVX2 optimization support
   replication     replication support
-  vhost-vsock     virtio sockets device support
   opengl          opengl support
   virglrenderer   virgl rendering support
   xfsctl          xfsctl support
@@ -1781,7 +1839,6 @@ disabled with --disable-FEATURE, default is enabled if available:
   parallels       parallels image format support
   sheepdog        sheepdog block driver support
   crypto-afalg    Linux AF_ALG crypto backend driver
-  vhost-user      vhost-user support
   capstone        capstone disassembler support
   debug-mutex     mutex debugging support
   libpmem         libpmem support
@@ -1791,8 +1848,12 @@ EOF
 exit 0
 fi
 
-if ! has $python; then
-  error_exit "Python not found. Use --python=/path/to/python"
+# Remove old dependency files to make sure that they get properly regenerated
+rm -f */config-devices.mak.d
+
+if test -z "$python"
+then
+    error_exit "Python not found. Use --python=/path/to/python"
 fi
 
 # Note that if the Python conditional here evaluates True we will exit
@@ -1835,7 +1896,7 @@ fi
 # Consult white-list to determine whether to enable werror
 # by default.  Only enable by default for git builds
 if test -z "$werror" ; then
-    if test -d "$source_path/.git" && \
+    if test -e "$source_path/.git" && \
         { test "$linux" = "yes" || test "$mingw32" = "yes"; }; then
         werror="yes"
     else
@@ -1881,7 +1942,7 @@ gcc_flags="-Wformat-security -Wformat-y2k -Winit-self -Wignored-qualifiers $gcc_
 gcc_flags="-Wno-missing-include-dirs -Wempty-body -Wnested-externs $gcc_flags"
 gcc_flags="-Wendif-labels -Wno-shift-negative-value $gcc_flags"
 gcc_flags="-Wno-initializer-overrides -Wexpansion-to-defined $gcc_flags"
-gcc_flags="-Wno-string-plus-int $gcc_flags"
+gcc_flags="-Wno-string-plus-int -Wno-typedef-redefinition $gcc_flags"
 # Note that we do not add -Werror to gcc_flags here, because that would
 # enable it for all configure tests. If a configure test failed due
 # to -Werror this would just silently disable some features,
@@ -1944,6 +2005,11 @@ if compile_object "-Werror" "" ; then
   :
 else
   QEMU_CFLAGS="$QEMU_CFLAGS -Wno-missing-braces"
+fi
+
+# Our module code doesn't support Windows
+if test "$modules" = "yes" && test "$mingw32" = "yes" ; then
+  error_exit "Modules are not available for Windows"
 fi
 
 # Static linking is not possible with modules or PIE
@@ -2171,6 +2237,45 @@ else
   l2tpv3=no
 fi
 
+#########################################
+# vhost interdependencies and host support
+
+# vhost backends
+test "$vhost_user" = "" && vhost_user=yes
+if test "$vhost_user" = "yes" && test "$mingw32" = "yes"; then
+  error_exit "vhost-user isn't available on win32"
+fi
+test "$vhost_kernel" = "" && vhost_kernel=$linux
+if test "$vhost_kernel" = "yes" && test "$linux" != "yes"; then
+  error_exit "vhost-kernel is only available on Linux"
+fi
+
+# vhost-kernel devices
+test "$vhost_scsi" = "" && vhost_scsi=$vhost_kernel
+if test "$vhost_scsi" = "yes" && test "$vhost_kernel" != "yes"; then
+  error_exit "--enable-vhost-scsi requires --enable-vhost-kernel"
+fi
+test "$vhost_vsock" = "" && vhost_vsock=$vhost_kernel
+if test "$vhost_vsock" = "yes" && test "$vhost_kernel" != "yes"; then
+  error_exit "--enable-vhost-vsock requires --enable-vhost-kernel"
+fi
+
+# vhost-user backends
+test "$vhost_net_user" = "" && vhost_net_user=$vhost_user
+if test "$vhost_net_user" = "yes" && test "$vhost_user" = "no"; then
+  error_exit "--enable-vhost-net-user requires --enable-vhost-user"
+fi
+test "$vhost_crypto" = "" && vhost_crypto=$vhost_user
+if test "$vhost_crypto" = "yes" && test "$vhost_user" = "no"; then
+  error_exit "--enable-vhost-crypto requires --enable-vhost-user"
+fi
+
+# OR the vhost-kernel and vhost-user values for simplicity
+if test "$vhost_net" = ""; then
+  test "$vhost_net_user" = "yes" && vhost_net=yes
+  test "$vhost_kernel" = "yes" && vhost_net=yes
+fi
+
 ##########################################
 # MinGW / Mingw-w64 localtime_r/gmtime_r check
 
@@ -2305,36 +2410,16 @@ fi
 ##########################################
 # libseccomp check
 
-libseccomp_minver="2.2.0"
 if test "$seccomp" != "no" ; then
-    case "$cpu" in
-    i386|x86_64|mips)
-        ;;
-    arm|aarch64)
-        libseccomp_minver="2.2.3"
-        ;;
-    ppc|ppc64|s390x)
-        libseccomp_minver="2.3.0"
-        ;;
-    *)
-        libseccomp_minver=""
-        ;;
-    esac
-
-    if test "$libseccomp_minver" != "" &&
-       $pkg_config --atleast-version=$libseccomp_minver libseccomp ; then
+    libseccomp_minver="2.3.0"
+    if $pkg_config --atleast-version=$libseccomp_minver libseccomp ; then
         seccomp_cflags="$($pkg_config --cflags libseccomp)"
         seccomp_libs="$($pkg_config --libs libseccomp)"
         seccomp="yes"
     else
         if test "$seccomp" = "yes" ; then
-            if test "$libseccomp_minver" != "" ; then
-                feature_not_found "libseccomp" \
-                    "Install libseccomp devel >= $libseccomp_minver"
-            else
-                feature_not_found "libseccomp" \
-                    "libseccomp is not supported for host cpu $cpu"
-            fi
+            feature_not_found "libseccomp" \
+                 "Install libseccomp devel >= $libseccomp_minver"
         fi
         seccomp="no"
     fi
@@ -2721,17 +2806,23 @@ fi
 # GNUTLS probe
 
 if test "$gnutls" != "no"; then
+    pass="no"
     if $pkg_config --exists "gnutls >= 3.1.18"; then
         gnutls_cflags=$($pkg_config --cflags gnutls)
         gnutls_libs=$($pkg_config --libs gnutls)
-        libs_softmmu="$gnutls_libs $libs_softmmu"
-        libs_tools="$gnutls_libs $libs_tools"
-	QEMU_CFLAGS="$QEMU_CFLAGS $gnutls_cflags"
-        gnutls="yes"
-    elif test "$gnutls" = "yes"; then
+        # Packaging for the static libraries is not always correct.
+        # At least ubuntu 18.04 ships only shared libraries.
+        write_c_skeleton
+        if compile_prog "" "$gnutls_libs" ; then
+            LIBS="$gnutls_libs $LIBS"
+            QEMU_CFLAGS="$QEMU_CFLAGS $gnutls_cflags"
+            pass="yes"
+        fi
+    fi
+    if test "$pass" = "no" && test "$gnutls" = "yes"; then
 	feature_not_found "gnutls" "Install gnutls devel >= 3.1.18"
     else
-        gnutls="no"
+        gnutls="$pass"
     fi
 fi
 
@@ -2786,43 +2877,52 @@ has_libgcrypt() {
 
 
 if test "$nettle" != "no"; then
+    pass="no"
     if $pkg_config --exists "nettle >= 2.7.1"; then
         nettle_cflags=$($pkg_config --cflags nettle)
         nettle_libs=$($pkg_config --libs nettle)
         nettle_version=$($pkg_config --modversion nettle)
-        libs_softmmu="$nettle_libs $libs_softmmu"
-        libs_tools="$nettle_libs $libs_tools"
-        QEMU_CFLAGS="$QEMU_CFLAGS $nettle_cflags"
-        nettle="yes"
-
-        if test -z "$gcrypt"; then
-           gcrypt="no"
+        # Link test to make sure the given libraries work (e.g for static).
+        write_c_skeleton
+        if compile_prog "" "$nettle_libs" ; then
+            LIBS="$nettle_libs $LIBS"
+            QEMU_CFLAGS="$QEMU_CFLAGS $nettle_cflags"
+            if test -z "$gcrypt"; then
+               gcrypt="no"
+            fi
+            pass="yes"
         fi
+    fi
+    if test "$pass" = "no" && test "$nettle" = "yes"; then
+        feature_not_found "nettle" "Install nettle devel >= 2.7.1"
     else
-        if test "$nettle" = "yes"; then
-            feature_not_found "nettle" "Install nettle devel >= 2.7.1"
-        else
-            nettle="no"
-        fi
+        nettle="$pass"
     fi
 fi
 
 if test "$gcrypt" != "no"; then
+    pass="no"
     if has_libgcrypt; then
         gcrypt_cflags=$(libgcrypt-config --cflags)
         gcrypt_libs=$(libgcrypt-config --libs)
-        # Debian has remove -lgpg-error from libgcrypt-config
+        # Debian has removed -lgpg-error from libgcrypt-config
         # as it "spreads unnecessary dependencies" which in
         # turn breaks static builds...
         if test "$static" = "yes"
         then
             gcrypt_libs="$gcrypt_libs -lgpg-error"
         fi
-        libs_softmmu="$gcrypt_libs $libs_softmmu"
-        libs_tools="$gcrypt_libs $libs_tools"
-        QEMU_CFLAGS="$QEMU_CFLAGS $gcrypt_cflags"
-        gcrypt="yes"
 
+        # Link test to make sure the given libraries work (e.g for static).
+        write_c_skeleton
+        if compile_prog "" "$gcrypt_libs" ; then
+            LIBS="$gcrypt_libs $LIBS"
+            QEMU_CFLAGS="$QEMU_CFLAGS $gcrypt_cflags"
+            pass="yes"
+        fi
+    fi
+    if test "$pass" = "yes"; then
+        gcrypt="yes"
         cat > $TMPC << EOF
 #include <gcrypt.h>
 int main(void) {
@@ -2835,12 +2935,10 @@ EOF
         if compile_prog "$gcrypt_cflags" "$gcrypt_libs" ; then
             gcrypt_hmac=yes
         fi
+    elif test "$gcrypt" = "yes"; then
+        feature_not_found "gcrypt" "Install gcrypt devel >= 1.5.0"
     else
-        if test "$gcrypt" = "yes"; then
-            feature_not_found "gcrypt" "Install gcrypt devel >= 1.5.0"
-        else
-            gcrypt="no"
-        fi
+        gcrypt="no"
     fi
 fi
 
@@ -2863,6 +2961,33 @@ else
     tasn1=no
 fi
 
+
+##########################################
+# PAM probe
+
+if test "$auth_pam" != "no"; then
+    cat > $TMPC <<EOF
+#include <security/pam_appl.h>
+#include <stdio.h>
+int main(void) {
+   const char *service_name = "qemu";
+   const char *user = "frank";
+   const struct pam_conv pam_conv = { 0 };
+   pam_handle_t *pamh = NULL;
+   pam_start(service_name, user, &pam_conv, &pamh);
+   return 0;
+}
+EOF
+    if compile_prog "" "-lpam" ; then
+        auth_pam=yes
+    else
+        if test "$auth_pam" = "yes"; then
+            feature_not_found "PAM" "Install PAM development package"
+        else
+            auth_pam=no
+        fi
+    fi
+fi
 
 ##########################################
 # getifaddrs (for tests/test-io-channel-socket )
@@ -3172,20 +3297,6 @@ if test "$xkbcommon" != "no" ; then
   fi
 fi
 
-##########################################
-# fnmatch() probe, used for ACL routines
-fnmatch="no"
-cat > $TMPC << EOF
-#include <fnmatch.h>
-int main(void)
-{
-    fnmatch("foo", "foo", 0);
-    return 0;
-}
-EOF
-if compile_prog "" "" ; then
-   fnmatch="yes"
-fi
 
 ##########################################
 # xfsctl() probe, used for file-posix.c
@@ -3380,7 +3491,51 @@ EOF
 fi
 
 ##########################################
+# iconv probe
+if test "$iconv" != "no" ; then
+  cat > $TMPC << EOF
+#include <iconv.h>
+int main(void) {
+  iconv_t conv = iconv_open("WCHAR_T", "UCS-2");
+  return conv != (iconv_t) -1;
+}
+EOF
+  iconv_prefix_list="/usr/local:/usr"
+  iconv_lib_list=":-liconv"
+  IFS=:
+  for iconv_prefix in $iconv_prefix_list; do
+    IFS=:
+    iconv_cflags="-I$iconv_prefix/include"
+    iconv_ldflags="-L$iconv_prefix/lib"
+    for iconv_link in $iconv_lib_list; do
+      unset IFS
+      iconv_lib="$iconv_ldflags $iconv_link"
+      echo "looking at iconv in '$iconv_cflags' '$iconv_lib'" >> config.log
+      if compile_prog "$iconv_cflags" "$iconv_lib" ; then
+        iconv_found=yes
+        break
+      fi
+    done
+    if test "$iconv_found" = yes ; then
+      break
+    fi
+  done
+  if test "$iconv_found" = "yes" ; then
+    iconv=yes
+  else
+    if test "$iconv" = "yes" ; then
+      feature_not_found "iconv" "Install iconv devel"
+    fi
+    iconv=no
+  fi
+fi
+
+##########################################
 # curses probe
+if test "$iconv" = "no" ; then
+  # curses will need iconv
+  curses=no
+fi
 if test "$curses" != "no" ; then
   if test "$mingw32" = "yes" ; then
     curses_inc_list="$($pkg_config --cflags ncurses 2>/dev/null):"
@@ -3394,14 +3549,17 @@ if test "$curses" != "no" ; then
 #include <locale.h>
 #include <curses.h>
 #include <wchar.h>
+#include <langinfo.h>
 int main(void) {
+  const char *codeset;
   wchar_t wch = L'w';
   setlocale(LC_ALL, "");
   resize_term(0, 0);
   addwstr(L"wide chars\n");
   addnwstr(&wch, 1);
   add_wch(WACS_DEGREE);
-  return 0;
+  codeset = nl_langinfo(CODESET);
+  return codeset != 0;
 }
 EOF
   IFS=:
@@ -3502,6 +3660,14 @@ for i in $glib_modules; do
         error_exit "glib-$glib_req_ver $i is required to compile QEMU"
     fi
 done
+
+if $pkg_config --atleast-version=$glib_req_ver gio-2.0; then
+    gio=yes
+    gio_cflags=$($pkg_config --cflags gio-2.0)
+    gio_libs=$($pkg_config --libs gio-2.0)
+else
+    gio=no
+fi
 
 # Sanity check that the current size_t matches the
 # size that glib thinks it should be. This catches
@@ -3759,43 +3925,34 @@ EOF
 fi
 
 ##########################################
-# libssh2 probe
-min_libssh2_version=1.2.8
-if test "$libssh2" != "no" ; then
-  if $pkg_config --atleast-version=$min_libssh2_version libssh2; then
-    libssh2_cflags=$($pkg_config libssh2 --cflags)
-    libssh2_libs=$($pkg_config libssh2 --libs)
-    libssh2=yes
+# libssh probe
+if test "$libssh" != "no" ; then
+  if $pkg_config --exists libssh; then
+    libssh_cflags=$($pkg_config libssh --cflags)
+    libssh_libs=$($pkg_config libssh --libs)
+    libssh=yes
   else
-    if test "$libssh2" = "yes" ; then
-      error_exit "libssh2 >= $min_libssh2_version required for --enable-libssh2"
+    if test "$libssh" = "yes" ; then
+      error_exit "libssh required for --enable-libssh"
     fi
-    libssh2=no
+    libssh=no
   fi
 fi
 
 ##########################################
-# libssh2_sftp_fsync probe
+# Check for libssh 0.8
+# This is done like this instead of using the LIBSSH_VERSION_* and
+# SSH_VERSION_* macros because some distributions in the past shipped
+# snapshots of the future 0.8 from Git, and those snapshots did not
+# have updated version numbers (still referring to 0.7.0).
 
-if test "$libssh2" = "yes"; then
+if test "$libssh" = "yes"; then
   cat > $TMPC <<EOF
-#include <stdio.h>
-#include <libssh2.h>
-#include <libssh2_sftp.h>
-int main(void) {
-    LIBSSH2_SESSION *session;
-    LIBSSH2_SFTP *sftp;
-    LIBSSH2_SFTP_HANDLE *sftp_handle;
-    session = libssh2_session_init ();
-    sftp = libssh2_sftp_init (session);
-    sftp_handle = libssh2_sftp_open (sftp, "/", 0, 0);
-    libssh2_sftp_fsync (sftp_handle);
-    return 0;
-}
+#include <libssh/libssh.h>
+int main(void) { return ssh_get_server_publickey(NULL, NULL); }
 EOF
-  # libssh2_cflags/libssh2_libs defined in previous test.
-  if compile_prog "$libssh2_cflags" "$libssh2_libs" ; then
-    QEMU_CFLAGS="-DHAS_LIBSSH2_SFTP_FSYNC $QEMU_CFLAGS"
+  if compile_prog "$libssh_cflags" "$libssh_libs"; then
+    libssh_cflags="-DHAVE_LIBSSH_0_8 $libssh_cflags"
   fi
 fi
 
@@ -3820,20 +3977,20 @@ EOF
 fi
 
 ##########################################
-# TPM passthrough is only on x86 Linux
+# TPM emulation is only on POSIX
 
-if test "$targetos" = Linux && { test "$cpu" = i386 || test "$cpu" = x86_64; }; then
-  tpm_passthrough=$tpm
-else
-  tpm_passthrough=no
+if test "$tpm" = ""; then
+  if test "$mingw32" = "yes"; then
+    tpm=no
+  else
+    tpm=yes
+  fi
+elif test "$tpm" = "yes"; then
+  if test "$mingw32" = "yes" ; then
+    error_exit "TPM emulation only available on POSIX systems"
+  fi
 fi
 
-# TPM emulator is for all posix systems
-if test "$mingw32" != "yes"; then
-  tpm_emulator=$tpm
-else
-  tpm_emulator=no
-fi
 ##########################################
 # attr probe
 
@@ -3955,6 +4112,13 @@ libs_softmmu="$libs_softmmu $fdt_libs"
 ##########################################
 # opengl probe (for sdl2, gtk, milkymist-tmu2)
 
+gbm="no"
+if $pkg_config gbm; then
+    gbm_cflags="$($pkg_config --cflags gbm)"
+    gbm_libs="$($pkg_config --libs gbm)"
+    gbm="yes"
+fi
+
 if test "$opengl" != "no" ; then
   opengl_pkgs="epoxy gbm"
   if $pkg_config $opengl_pkgs; then
@@ -4029,6 +4193,38 @@ if test "$glusterfs" != "no" ; then
     if $pkg_config --atleast-version=6 glusterfs-api; then
       glusterfs_fallocate="yes"
       glusterfs_zerofill="yes"
+    fi
+    cat > $TMPC << EOF
+#include <glusterfs/api/glfs.h>
+
+int
+main(void)
+{
+	/* new glfs_ftruncate() passes two additional args */
+	return glfs_ftruncate(NULL, 0, NULL, NULL);
+}
+EOF
+    if compile_prog "$glusterfs_cflags" "$glusterfs_libs" ; then
+      glusterfs_ftruncate_has_stat="yes"
+    fi
+    cat > $TMPC << EOF
+#include <glusterfs/api/glfs.h>
+
+/* new glfs_io_cbk() passes two additional glfs_stat structs */
+static void
+glusterfs_iocb(glfs_fd_t *fd, ssize_t ret, struct glfs_stat *prestat, struct glfs_stat *poststat, void *data)
+{}
+
+int
+main(void)
+{
+	glfs_io_cbk iocb = &glusterfs_iocb;
+	iocb(NULL, 0 , NULL, NULL, NULL);
+	return 0;
+}
+EOF
+    if compile_prog "$glusterfs_cflags" "$glusterfs_libs" ; then
+      glusterfs_iocb_has_stat="yes"
     fi
   else
     if test "$glusterfs" = "yes" ; then
@@ -4536,13 +4732,24 @@ if compile_prog "" "" ; then
   syncfs=yes
 fi
 
+# Check we have a new enough version of sphinx-build
+has_sphinx_build() {
+    # This is a bit awkward but works: create a trivial document and
+    # try to run it with our configuration file (which enforces a
+    # version requirement). This will fail if either
+    # sphinx-build doesn't exist at all or if it is too old.
+    mkdir -p "$TMPDIR1/sphinx"
+    touch "$TMPDIR1/sphinx/index.rst"
+    sphinx-build -c "$source_path/docs" -b html "$TMPDIR1/sphinx" "$TMPDIR1/sphinx/out" >/dev/null 2>&1
+}
+
 # Check if tools are available to build documentation.
 if test "$docs" != "no" ; then
-  if has makeinfo && has pod2man; then
+  if has makeinfo && has pod2man && has_sphinx_build; then
     docs=yes
   else
     if test "$docs" = "yes" ; then
-      feature_not_found "docs" "Install texinfo and Perl/perl-podlators"
+      feature_not_found "docs" "Install texinfo, Perl/perl-podlators and python-sphinx"
     fi
     docs=no
   fi
@@ -4778,7 +4985,7 @@ int main(void) {
 EOF
   if compile_prog "" "" ; then
     guest_agent_ntddscsi=yes
-    libs_qga="-lsetupapi $libs_qga"
+    libs_qga="-lsetupapi -lcfgmgr32 $libs_qga"
   fi
 fi
 
@@ -4841,12 +5048,12 @@ case "$capstone" in
     else
       LIBCAPSTONE=libcapstone.a
     fi
-    LIBS="-L\$(BUILD_DIR)/capstone -lcapstone $LIBS"
+    libs_cpu="-L\$(BUILD_DIR)/capstone -lcapstone $libs_cpu"
     ;;
 
   system)
     QEMU_CFLAGS="$QEMU_CFLAGS $($pkg_config --cflags capstone)"
-    LIBS="$($pkg_config --libs capstone) $LIBS"
+    libs_cpu="$($pkg_config --libs capstone) $libs_cpu"
     ;;
 
   no)
@@ -4934,7 +5141,7 @@ fi
 sem_timedwait=no
 cat > $TMPC << EOF
 #include <semaphore.h>
-int main(void) { return sem_timedwait(0, 0); }
+int main(void) { sem_t s; struct timespec t = {0}; return sem_timedwait(&s, &t); }
 EOF
 if compile_prog "" "" ; then
     sem_timedwait=yes
@@ -5629,6 +5836,20 @@ if compile_prog "" "" ; then
 fi
 
 ##########################################
+# check for getrandom()
+
+have_getrandom=no
+cat > $TMPC << EOF
+#include <sys/random.h>
+int main(void) {
+    return getrandom(0, 0, GRND_NONBLOCK);
+}
+EOF
+if compile_prog "" "" ; then
+    have_getrandom=yes
+fi
+
+##########################################
 # checks for sanitizers
 
 have_asan=no
@@ -5700,6 +5921,55 @@ if test "$libpmem" != "no"; then
 		libpmem="no"
 	fi
 fi
+
+##########################################
+# check for slirp
+
+case "$slirp" in
+  "" | yes)
+    if $pkg_config slirp; then
+      slirp=system
+    elif test -e "${source_path}/.git" && test $git_update = 'yes' ; then
+      slirp=git
+    elif test -e "${source_path}/slirp/Makefile" ; then
+      slirp=internal
+    elif test -z "$slirp" ; then
+      slirp=no
+    else
+      feature_not_found "slirp" "Install slirp devel or git submodule"
+    fi
+    ;;
+
+  system)
+    if ! $pkg_config slirp; then
+      feature_not_found "slirp" "Install slirp devel"
+    fi
+    ;;
+esac
+
+case "$slirp" in
+  git | internal)
+    if test "$slirp" = git; then
+      git_submodules="${git_submodules} slirp"
+    fi
+    mkdir -p slirp
+    slirp_cflags="-I\$(SRC_PATH)/slirp/src -I\$(BUILD_DIR)/slirp/src"
+    slirp_libs="-L\$(BUILD_DIR)/slirp -lslirp"
+    ;;
+
+  system)
+    slirp_version=$($pkg_config --modversion slirp 2>/dev/null)
+    slirp_cflags=$($pkg_config --cflags slirp 2>/dev/null)
+    slirp_libs=$($pkg_config --libs slirp 2>/dev/null)
+    ;;
+
+  no)
+    ;;
+  *)
+    error_exit "Unknown state for slirp: $slirp"
+    ;;
+esac
+
 
 ##########################################
 # End of CC checks
@@ -5782,6 +6052,17 @@ if test "$mingw32" = "yes" ; then
     done
 fi
 
+# Disable OpenBSD W^X if available
+if test "$tcg" = "yes" && test "$targetos" = "OpenBSD"; then
+    cat > $TMPC <<EOF
+    int main(void) { return 0; }
+EOF
+    wx_ldflags="-Wl,-z,wxneeded"
+    if compile_prog "" "$wx_ldflags"; then
+        QEMU_LDFLAGS="$QEMU_LDFLAGS $wx_ldflags"
+    fi
+fi
+
 qemu_confdir=$sysconfdir$confsuffix
 qemu_moddir=$libdir$confsuffix
 qemu_datadir=$datadir$confsuffix
@@ -5845,7 +6126,9 @@ fi
 # Probe for guest agent support/options
 
 if [ "$guest_agent" != "no" ]; then
-  if [ "$linux" = "yes" -o "$bsd" = "yes" -o "$solaris" = "yes" -o "$mingw32" = "yes" ] ; then
+  if [ "$softmmu" = no -a "$want_tools" = no ] ; then
+      guest_agent=no
+  elif [ "$linux" = "yes" -o "$bsd" = "yes" -o "$solaris" = "yes" -o "$mingw32" = "yes" ] ; then
       tools="qemu-ga $tools"
       guest_agent=yes
   elif [ "$guest_agent" != yes ]; then
@@ -5928,7 +6211,7 @@ if { test "$cpu" = "i386" || test "$cpu" = "x86_64"; } && \
         fi
     done
 fi
-if test "$cpu" = "ppc64" && test "$targetos" != "Darwin" ; then
+if test "$ARCH" = "ppc64" && test "$targetos" != "Darwin" ; then
   roms="$roms spapr-rtas"
 fi
 
@@ -6058,7 +6341,8 @@ echo "QEMU_LDFLAGS      $QEMU_LDFLAGS"
 echo "make              $make"
 echo "install           $install"
 echo "python            $python ($python_version)"
-if test "$slirp" = "yes" ; then
+echo "slirp support     $slirp $(echo_version $slirp $slirp_version)"
+if test "$slirp" != "no" ; then
     echo "smbd              $smbd"
 fi
 echo "module support    $modules"
@@ -6083,6 +6367,8 @@ echo "GNUTLS support    $gnutls"
 echo "libgcrypt         $gcrypt"
 echo "nettle            $nettle $(echo_version $nettle $nettle_version)"
 echo "libtasn1          $tasn1"
+echo "PAM               $auth_pam"
+echo "iconv support     $iconv"
 echo "curses support    $curses"
 echo "virgl support     $virglrenderer $(echo_version $virglrenderer $virgl_version)"
 echo "curl support      $curl"
@@ -6167,9 +6453,7 @@ echo "GlusterFS support $glusterfs"
 echo "gcov              $gcov_tool"
 echo "gcov enabled      $gcov"
 echo "TPM support       $tpm"
-echo "libssh2 support   $libssh2"
-echo "TPM passthrough   $tpm_passthrough"
-echo "TPM emulator      $tpm_emulator"
+echo "libssh support    $libssh"
 echo "QOM debugging     $qom_cast_debug"
 echo "Live block migration $live_block_migration"
 echo "lzo support       $lzo"
@@ -6196,6 +6480,7 @@ echo "capstone          $capstone"
 echo "docker            $docker"
 echo "libpmem support   $libpmem"
 echo "libudev           $libudev"
+echo "default devices   $default_devices"
 
 if test "$supported_cpu" = "no"; then
     echo
@@ -6221,6 +6506,14 @@ if test "$supported_os" = "no"; then
     echo "configure has succeeded and you can continue to build, but"
     echo "if you care about QEMU on this platform you should contact"
     echo "us upstream at qemu-devel@nongnu.org."
+fi
+
+# Note that if the Python conditional here evaluates True we will exit
+# with status 1 which is a shell 'false' value.
+if ! $python -c 'import sys; sys.exit(sys.version_info < (3,0))'; then
+  echo
+  echo "warning: Python 2 support is deprecated" >&2
+  echo "warning: Python 3 will be required for building future versions of QEMU" >&2
 fi
 
 config_host_mak="config-host.mak"
@@ -6250,6 +6543,7 @@ echo "qemu_helperdir=$libexecdir" >> $config_host_mak
 echo "qemu_localedir=$qemu_localedir" >> $config_host_mak
 echo "qemu_icondir=$qemu_icondir" >> $config_host_mak
 echo "qemu_desktopdir=$qemu_desktopdir" >> $config_host_mak
+echo "libs_cpu=$libs_cpu" >> $config_host_mak
 echo "libs_softmmu=$libs_softmmu" >> $config_host_mak
 echo "GIT=$git" >> $config_host_mak
 echo "GIT_SUBMODULES=$git_submodules" >> $config_host_mak
@@ -6257,6 +6551,11 @@ echo "GIT_UPDATE=$git_update" >> $config_host_mak
 
 echo "ARCH=$ARCH" >> $config_host_mak
 
+if test "$default_devices" = "yes" ; then
+  echo "CONFIG_MINIKCONF_MODE=--defconfig" >> $config_host_mak
+else
+  echo "CONFIG_MINIKCONF_MODE=--allnoconfig" >> $config_host_mak
+fi
 if test "$debug_tcg" = "yes" ; then
   echo "CONFIG_DEBUG_TCG=y" >> $config_host_mak
 fi
@@ -6318,9 +6617,14 @@ fi
 if test "$profiler" = "yes" ; then
   echo "CONFIG_PROFILER=y" >> $config_host_mak
 fi
-if test "$slirp" = "yes" ; then
+if test "$slirp" != "no"; then
   echo "CONFIG_SLIRP=y" >> $config_host_mak
   echo "CONFIG_SMBD_COMMAND=\"$smbd\"" >> $config_host_mak
+  echo "SLIRP_CFLAGS=$slirp_cflags" >> $config_host_mak
+  echo "SLIRP_LIBS=$slirp_libs" >> $config_host_mak
+fi
+if [ "$slirp" = "git" -o "$slirp" = "internal" ]; then
+    echo "config-host.h: slirp/all" >> $config_host_mak
 fi
 if test "$vde" = "yes" ; then
   echo "CONFIG_VDE=y" >> $config_host_mak
@@ -6374,9 +6678,6 @@ if test "$xkbcommon" = "yes" ; then
   echo "XKBCOMMON_CFLAGS=$xkbcommon_cflags" >> $config_host_mak
   echo "XKBCOMMON_LIBS=$xkbcommon_libs" >> $config_host_mak
 fi
-if test "$fnmatch" = "yes" ; then
-  echo "CONFIG_FNMATCH=y" >> $config_host_mak
-fi
 if test "$xfs" = "yes" ; then
   echo "CONFIG_XFS=y" >> $config_host_mak
 fi
@@ -6409,6 +6710,11 @@ if test "$sdl" = "yes" ; then
 fi
 if test "$cocoa" = "yes" ; then
   echo "CONFIG_COCOA=y" >> $config_host_mak
+fi
+if test "$iconv" = "yes" ; then
+  echo "CONFIG_ICONV=y" >> $config_host_mak
+  echo "ICONV_CFLAGS=$iconv_cflags" >> $config_host_mak
+  echo "ICONV_LIBS=$iconv_lib" >> $config_host_mak
 fi
 if test "$curses" = "yes" ; then
   echo "CONFIG_CURSES=m" >> $config_host_mak
@@ -6520,6 +6826,11 @@ if test "$gtk" = "yes" ; then
     echo "CONFIG_GTK_GL=y" >> $config_host_mak
   fi
 fi
+if test "$gio" = "yes" ; then
+    echo "CONFIG_GIO=y" >> $config_host_mak
+    echo "GIO_CFLAGS=$gio_cflags" >> $config_host_mak
+    echo "GIO_LIBS=$gio_libs" >> $config_host_mak
+fi
 echo "CONFIG_TLS_PRIORITY=\"$tls_priority\"" >> $config_host_mak
 if test "$gnutls" = "yes" ; then
   echo "CONFIG_GNUTLS=y" >> $config_host_mak
@@ -6536,6 +6847,9 @@ if test "$nettle" = "yes" ; then
 fi
 if test "$tasn1" = "yes" ; then
   echo "CONFIG_TASN1=y" >> $config_host_mak
+fi
+if test "$auth_pam" = "yes" ; then
+    echo "CONFIG_AUTH_PAM=y" >> $config_host_mak
 fi
 if test "$have_ifaddrs_h" = "yes" ; then
     echo "HAVE_IFADDRS_H=y" >> $config_host_mak
@@ -6589,14 +6903,20 @@ fi
 if test "$vhost_scsi" = "yes" ; then
   echo "CONFIG_VHOST_SCSI=y" >> $config_host_mak
 fi
-if test "$vhost_net" = "yes" && test "$vhost_user" = "yes"; then
-  echo "CONFIG_VHOST_NET_USED=y" >> $config_host_mak
+if test "$vhost_net" = "yes" ; then
+  echo "CONFIG_VHOST_NET=y" >> $config_host_mak
+fi
+if test "$vhost_net_user" = "yes" ; then
+  echo "CONFIG_VHOST_NET_USER=y" >> $config_host_mak
 fi
 if test "$vhost_crypto" = "yes" ; then
   echo "CONFIG_VHOST_CRYPTO=y" >> $config_host_mak
 fi
 if test "$vhost_vsock" = "yes" ; then
   echo "CONFIG_VHOST_VSOCK=y" >> $config_host_mak
+fi
+if test "$vhost_kernel" = "yes" ; then
+  echo "CONFIG_VHOST_KERNEL=y" >> $config_host_mak
 fi
 if test "$vhost_user" = "yes" ; then
   echo "CONFIG_VHOST_USER=y" >> $config_host_mak
@@ -6670,6 +6990,13 @@ if test "$opengl" = "yes" ; then
     echo "CONFIG_OPENGL_DMABUF=y" >> $config_host_mak
   fi
 fi
+
+if test "$gbm" = "yes" ; then
+    echo "CONFIG_GBM=y" >> $config_host_mak
+    echo "GBM_LIBS=$gbm_libs" >> $config_host_mak
+    echo "GBM_CFLAGS=$gbm_cflags" >> $config_host_mak
+fi
+
 
 if test "$malloc_trim" = "yes" ; then
   echo "CONFIG_MALLOC_TRIM=y" >> $config_host_mak
@@ -6820,10 +7147,18 @@ if test "$glusterfs_zerofill" = "yes" ; then
   echo "CONFIG_GLUSTERFS_ZEROFILL=y" >> $config_host_mak
 fi
 
-if test "$libssh2" = "yes" ; then
-  echo "CONFIG_LIBSSH2=m" >> $config_host_mak
-  echo "LIBSSH2_CFLAGS=$libssh2_cflags" >> $config_host_mak
-  echo "LIBSSH2_LIBS=$libssh2_libs" >> $config_host_mak
+if test "$glusterfs_ftruncate_has_stat" = "yes" ; then
+  echo "CONFIG_GLUSTERFS_FTRUNCATE_HAS_STAT=y" >> $config_host_mak
+fi
+
+if test "$glusterfs_iocb_has_stat" = "yes" ; then
+  echo "CONFIG_GLUSTERFS_IOCB_HAS_STAT=y" >> $config_host_mak
+fi
+
+if test "$libssh" = "yes" ; then
+  echo "CONFIG_LIBSSH=m" >> $config_host_mak
+  echo "LIBSSH_CFLAGS=$libssh_cflags" >> $config_host_mak
+  echo "LIBSSH_LIBS=$libssh_libs" >> $config_host_mak
 fi
 
 if test "$live_block_migration" = "yes" ; then
@@ -6831,15 +7166,7 @@ if test "$live_block_migration" = "yes" ; then
 fi
 
 if test "$tpm" = "yes"; then
-  echo 'CONFIG_TPM=$(CONFIG_SOFTMMU)' >> $config_host_mak
-  # TPM passthrough support?
-  if test "$tpm_passthrough" = "yes"; then
-    echo "CONFIG_TPM_PASSTHROUGH=y" >> $config_host_mak
-  fi
-  # TPM emulator support?
-  if test "$tpm_emulator" = "yes"; then
-    echo "CONFIG_TPM_EMULATOR=y" >> $config_host_mak
-  fi
+  echo 'CONFIG_TPM=y' >> $config_host_mak
 fi
 
 echo "TRACE_BACKENDS=$trace_backends" >> $config_host_mak
@@ -6917,7 +7244,9 @@ fi
 if test "$have_utmpx" = "yes" ; then
   echo "HAVE_UTMPX=y" >> $config_host_mak
 fi
-
+if test "$have_getrandom" = "yes" ; then
+  echo "CONFIG_GETRANDOM=y" >> $config_host_mak
+fi
 if test "$ivshmem" = "yes" ; then
   echo "CONFIG_IVSHMEM=y" >> $config_host_mak
 fi
@@ -7075,7 +7404,7 @@ if test "$linux" = "yes" ; then
   i386|x86_64|x32)
     linux_arch=x86
     ;;
-  ppc|ppc64)
+  ppc|ppc64|ppc64le)
     linux_arch=powerpc
     ;;
   s390x)
@@ -7236,7 +7565,8 @@ case "$target_name" in
   ;;
   ppc)
     gdb_xml_files="power-core.xml power-fpu.xml power-altivec.xml power-spe.xml"
-    target_compiler=$cross_cc_powerpc
+    target_compiler=$cross_cc_ppc
+    target_compiler_cflags="$cross_cc_cflags_ppc"
   ;;
   ppc64)
     TARGET_BASE_ARCH=ppc
@@ -7244,6 +7574,7 @@ case "$target_name" in
     mttcg=yes
     gdb_xml_files="power64-core.xml power-fpu.xml power-altivec.xml power-spe.xml power-vsx.xml"
     target_compiler=$cross_cc_ppc64
+    target_compiler_cflags="$cross_cc_cflags_ppc64"
   ;;
   ppc64le)
     TARGET_ARCH=ppc64
@@ -7265,12 +7596,14 @@ case "$target_name" in
     TARGET_BASE_ARCH=riscv
     TARGET_ABI_DIR=riscv
     mttcg=yes
+    gdb_xml_files="riscv-32bit-cpu.xml riscv-32bit-fpu.xml riscv-32bit-csr.xml"
     target_compiler=$cross_cc_riscv32
   ;;
   riscv64)
     TARGET_BASE_ARCH=riscv
     TARGET_ABI_DIR=riscv
     mttcg=yes
+    gdb_xml_files="riscv-64bit-cpu.xml riscv-64bit-fpu.xml riscv-64bit-csr.xml"
     target_compiler=$cross_cc_riscv64
   ;;
   sh4|sh4eb)
@@ -7362,18 +7695,18 @@ fi
 
 if supported_xen_target $target; then
     echo "CONFIG_XEN=y" >> $config_target_mak
+    echo "$target/config-devices.mak: CONFIG_XEN=y" >> $config_host_mak
     if test "$xen_pci_passthrough" = yes; then
         echo "CONFIG_XEN_PCI_PASSTHROUGH=y" >> "$config_target_mak"
     fi
+else
+    echo "$target/config-devices.mak: CONFIG_XEN=n" >> $config_host_mak
 fi
 if supported_kvm_target $target; then
     echo "CONFIG_KVM=y" >> $config_target_mak
-    if test "$vhost_net" = "yes" ; then
-        echo "CONFIG_VHOST_NET=y" >> $config_target_mak
-        if test "$vhost_user" = "yes" ; then
-            echo "CONFIG_VHOST_USER_NET_TEST_$target_name=y" >> $config_host_mak
-        fi
-    fi
+    echo "$target/config-devices.mak: CONFIG_KVM=y" >> $config_host_mak
+else
+    echo "$target/config-devices.mak: CONFIG_KVM=n" >> $config_host_mak
 fi
 if supported_hax_target $target; then
     echo "CONFIG_HAX=y" >> $config_target_mak
@@ -7554,16 +7887,19 @@ echo "QEMU_CFLAGS+=$cflags" >> $config_target_mak
 
 done # for target in $targets
 
+echo "PIXMAN_CFLAGS=$pixman_cflags" >> $config_host_mak
+echo "PIXMAN_LIBS=$pixman_libs" >> $config_host_mak
+
 if test -n "$enabled_cross_compilers"; then
     echo
     echo "NOTE: cross-compilers enabled: $enabled_cross_compilers"
 fi
 
 if [ "$fdt" = "git" ]; then
-  echo "config-host.h: subdir-dtc" >> $config_host_mak
+  echo "config-host.h: dtc/all" >> $config_host_mak
 fi
 if [ "$capstone" = "git" -o "$capstone" = "internal" ]; then
-  echo "config-host.h: subdir-capstone" >> $config_host_mak
+  echo "config-host.h: capstone/all" >> $config_host_mak
 fi
 if test -n "$LIBCAPSTONE"; then
   echo "LIBCAPSTONE=$LIBCAPSTONE" >> $config_host_mak
@@ -7588,11 +7924,11 @@ fi
 # tests might fail. Prefer to keep the relevant files in their own
 # directory and symlink the directory instead.
 DIRS="tests tests/tcg tests/tcg/cris tests/tcg/lm32 tests/libqos tests/qapi-schema tests/tcg/xtensa tests/qemu-iotests tests/vm"
-DIRS="$DIRS tests/fp"
+DIRS="$DIRS tests/fp tests/qgraph"
 DIRS="$DIRS docs docs/interop fsdev scsi"
 DIRS="$DIRS pc-bios/optionrom pc-bios/spapr-rtas pc-bios/s390-ccw"
 DIRS="$DIRS roms/seabios roms/vgabios"
-LINKS="Makefile tests/tcg/Makefile qdict-test-data.txt"
+LINKS="Makefile tests/tcg/Makefile"
 LINKS="$LINKS tests/tcg/cris/Makefile tests/tcg/cris/.gdbinit"
 LINKS="$LINKS tests/tcg/lm32/Makefile tests/tcg/xtensa/Makefile po/Makefile"
 LINKS="$LINKS tests/fp/Makefile"
@@ -7604,15 +7940,16 @@ LINKS="$LINKS pc-bios/qemu-icon.bmp"
 LINKS="$LINKS .gdbinit scripts" # scripts needed by relative path in .gdbinit
 LINKS="$LINKS tests/acceptance tests/data"
 LINKS="$LINKS tests/qemu-iotests/check"
+LINKS="$LINKS python"
 for bios_file in \
     $source_path/pc-bios/*.bin \
     $source_path/pc-bios/*.lid \
-    $source_path/pc-bios/*.aml \
     $source_path/pc-bios/*.rom \
     $source_path/pc-bios/*.dtb \
     $source_path/pc-bios/*.img \
     $source_path/pc-bios/openbios-* \
     $source_path/pc-bios/u-boot.* \
+    $source_path/pc-bios/edk2-*.fd.bz2 \
     $source_path/pc-bios/palcode-*
 do
     LINKS="$LINKS pc-bios/$(basename $bios_file)"

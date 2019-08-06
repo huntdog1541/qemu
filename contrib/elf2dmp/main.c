@@ -5,9 +5,8 @@
  *
  */
 
-#include <inttypes.h>
-
 #include "qemu/osdep.h"
+
 #include "err.h"
 #include "addrspace.h"
 #include "pe.h"
@@ -522,6 +521,12 @@ int main(int argc, char *argv[])
         if (*(uint16_t *)nt_start_addr == 0x5a4d) { /* MZ */
             break;
         }
+    }
+
+    if (!nt_start_addr) {
+        eprintf("Failed to find NT kernel image\n");
+        err = 1;
+        goto out_ps;
     }
 
     printf("KernBase = 0x%016"PRIx64", signature is \'%.2s\'\n", KernBase,

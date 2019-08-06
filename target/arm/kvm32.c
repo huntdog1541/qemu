@@ -20,7 +20,6 @@
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "internals.h"
-#include "hw/arm/arm.h"
 #include "qemu/log.h"
 
 static inline void set_feature(uint64_t *features, int feature)
@@ -124,9 +123,6 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
 
     if (extract32(id_pfr0, 12, 4) == 1) {
         set_feature(&features, ARM_FEATURE_THUMB2EE);
-    }
-    if (extract32(ahcf->isar.mvfr1, 20, 4) == 1) {
-        set_feature(&features, ARM_FEATURE_VFP_FP16);
     }
     if (extract32(ahcf->isar.mvfr1, 12, 4) == 1) {
         set_feature(&features, ARM_FEATURE_NEON);
@@ -242,6 +238,11 @@ int kvm_arch_init_vcpu(CPUState *cs)
     kvm_arm_init_serror_injection(cs);
 
     return kvm_arm_init_cpreg_list(cpu);
+}
+
+int kvm_arch_destroy_vcpu(CPUState *cs)
+{
+	return 0;
 }
 
 typedef struct Reg {

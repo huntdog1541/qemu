@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
@@ -94,7 +95,7 @@ void itc_reconfigure(MIPSITUState *tag)
 
     if (tag->saar_present) {
         address = ((*(uint64_t *) tag->saar) & 0xFFFFFFFFE000ULL) << 4;
-        size = 1 << ((*(uint64_t *) tag->saar >> 1) & 0x1f);
+        size = 1ULL << ((*(uint64_t *) tag->saar >> 1) & 0x1f);
         is_enabled = *(uint64_t *) tag->saar & 1;
     }
 

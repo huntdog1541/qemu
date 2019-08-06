@@ -102,6 +102,24 @@ class QAPISemError(QAPIError):
 
 
 class QAPIDoc(object):
+    """
+    A documentation comment block, either expression or free-form
+
+    Expression documentation blocks consist of
+
+    * a body section: one line naming the expression, followed by an
+      overview (any number of lines)
+
+    * argument sections: a description of each argument (for commands
+      and events) or member (for structs, unions and alternates)
+
+    * features sections: a description of each feature flag
+
+    * additional (non-argument) sections, possibly tagged
+
+    Free-form documentation blocks consist only of a body section.
+    """
+
     class Section(object):
         def __init__(self, name=None):
             # optional section name (argument/member or section name)
@@ -131,10 +149,12 @@ class QAPIDoc(object):
         self.body = QAPIDoc.Section()
         # dict mapping parameter name to ArgSection
         self.args = OrderedDict()
+        self.features = OrderedDict()
         # a list of Section
         self.sections = []
         # the current section
         self._section = self.body
+        self._append_line = self._append_body_line
 
     def has_section(self, name):
         """Return True if we have a section with this name."""
@@ -144,7 +164,16 @@ class QAPIDoc(object):
         return False
 
     def append(self, line):
-        """Parse a comment line and add it to the documentation."""
+        """
+        Parse a comment line and add it to the documentation.
+
+        The way that the line is dealt with depends on which part of
+        the documentation we're parsing right now:
+        * The body section: ._append_line is ._append_body_line
+        * An argument section: ._append_line is ._append_args_line
+        * A features section: ._append_line is ._append_features_line
+        * An additional section: ._append_line is ._append_various_line
+        """
         line = line[1:]
         if not line:
             self._append_freeform(line)
@@ -153,54 +182,155 @@ class QAPIDoc(object):
         if line[0] != ' ':
             raise QAPIParseError(self._parser, "Missing space after #")
         line = line[1:]
+        self._append_line(line)
 
+    def end_comment(self):
+        self._end_section()
+
+    @staticmethod
+    def _is_section_tag(name):
+        return name in ('Returns:', 'Since:',
+                        # those are often singular or plural
+                        'Note:', 'Notes:',
+                        'Example:', 'Examples:',
+                        'TODO:')
+
+    def _append_body_line(self, line):
+        """
+        Process a line of documentation text in the body section.
+
+        If this a symbol line and it is the section's first line, this
+        is an expression documentation block for that symbol.
+
+        If it's an expression documentation block, another symbol line
+        begins the argument section for the argument named by it, and
+        a section tag begins an additional section.  Start that
+        section and append the line to it.
+
+        Else, append the line to the current section.
+        """
+        name = line.split(' ', 1)[0]
         # FIXME not nice: things like '#  @foo:' and '# @foo: ' aren't
         # recognized, and get silently treated as ordinary text
-        if self.symbol:
-            self._append_symbol_line(line)
-        elif not self.body.text and line.startswith('@'):
+        if not self.symbol and not self.body.text and line.startswith('@'):
             if not line.endswith(':'):
                 raise QAPIParseError(self._parser, "Line should end with :")
             self.symbol = line[1:-1]
             # FIXME invalid names other than the empty string aren't flagged
             if not self.symbol:
                 raise QAPIParseError(self._parser, "Invalid name")
+        elif self.symbol:
+            # This is an expression documentation block
+            if name.startswith('@') and name.endswith(':'):
+                self._append_line = self._append_args_line
+                self._append_args_line(line)
+            elif line == 'Features:':
+                self._append_line = self._append_features_line
+            elif self._is_section_tag(name):
+                self._append_line = self._append_various_line
+                self._append_various_line(line)
+            else:
+                self._append_freeform(line.strip())
         else:
-            self._append_freeform(line)
+            # This is a free-form documentation block
+            self._append_freeform(line.strip())
 
-    def end_comment(self):
-        self._end_section()
+    def _append_args_line(self, line):
+        """
+        Process a line of documentation text in an argument section.
 
-    def _append_symbol_line(self, line):
+        A symbol line begins the next argument section, a section tag
+        section or a non-indented line after a blank line begins an
+        additional section.  Start that section and append the line to
+        it.
+
+        Else, append the line to the current section.
+
+        """
         name = line.split(' ', 1)[0]
 
         if name.startswith('@') and name.endswith(':'):
             line = line[len(name)+1:]
             self._start_args_section(name[1:-1])
-        elif name in ('Returns:', 'Since:',
-                      # those are often singular or plural
-                      'Note:', 'Notes:',
-                      'Example:', 'Examples:',
-                      'TODO:'):
+        elif self._is_section_tag(name):
+            self._append_line = self._append_various_line
+            self._append_various_line(line)
+            return
+        elif (self._section.text.endswith('\n\n')
+              and line and not line[0].isspace()):
+            if line == 'Features:':
+                self._append_line = self._append_features_line
+            else:
+                self._start_section()
+                self._append_line = self._append_various_line
+                self._append_various_line(line)
+            return
+
+        self._append_freeform(line.strip())
+
+    def _append_features_line(self, line):
+        name = line.split(' ', 1)[0]
+
+        if name.startswith('@') and name.endswith(':'):
+            line = line[len(name)+1:]
+            self._start_features_section(name[1:-1])
+        elif self._is_section_tag(name):
+            self._append_line = self._append_various_line
+            self._append_various_line(line)
+            return
+        elif (self._section.text.endswith('\n\n')
+              and line and not line[0].isspace()):
+            self._start_section()
+            self._append_line = self._append_various_line
+            self._append_various_line(line)
+            return
+
+        self._append_freeform(line.strip())
+
+    def _append_various_line(self, line):
+        """
+        Process a line of documentation text in an additional section.
+
+        A symbol line is an error.
+
+        A section tag begins an additional section.  Start that
+        section and append the line to it.
+
+        Else, append the line to the current section.
+        """
+        name = line.split(' ', 1)[0]
+
+        if name.startswith('@') and name.endswith(':'):
+            raise QAPIParseError(self._parser,
+                                 "'%s' can't follow '%s' section"
+                                 % (name, self.sections[0].name))
+        elif self._is_section_tag(name):
             line = line[len(name)+1:]
             self._start_section(name[:-1])
 
+        if (not self._section.name or
+                not self._section.name.startswith('Example')):
+            line = line.strip()
+
         self._append_freeform(line)
 
-    def _start_args_section(self, name):
+    def _start_symbol_section(self, symbols_dict, name):
         # FIXME invalid names other than the empty string aren't flagged
         if not name:
             raise QAPIParseError(self._parser, "Invalid parameter name")
-        if name in self.args:
+        if name in symbols_dict:
             raise QAPIParseError(self._parser,
                                  "'%s' parameter name duplicated" % name)
-        if self.sections:
-            raise QAPIParseError(self._parser,
-                                 "'@%s:' can't follow '%s' section"
-                                 % (name, self.sections[0].name))
+        assert not self.sections
         self._end_section()
         self._section = QAPIDoc.ArgSection(name)
-        self.args[name] = self._section
+        symbols_dict[name] = self._section
+
+    def _start_args_section(self, name):
+        self._start_symbol_section(self.args, name)
+
+    def _start_features_section(self, name):
+        self._start_symbol_section(self.features, name)
 
     def _start_section(self, name=None):
         if name in ('Returns', 'Since') and self.has_section(name):
@@ -219,13 +349,6 @@ class QAPIDoc(object):
             self._section = None
 
     def _append_freeform(self, line):
-        in_arg = isinstance(self._section, QAPIDoc.ArgSection)
-        if (in_arg and self._section.text.endswith('\n\n')
-                and line and not line[0].isspace()):
-            self._start_section()
-        if (in_arg or not self._section.name
-                or not self._section.name.startswith('Example')):
-            line = line.strip()
         match = re.match(r'(@\S+:)', line)
         if match:
             raise QAPIParseError(self._parser,
@@ -886,11 +1009,25 @@ def check_enum(expr, info):
 def check_struct(expr, info):
     name = expr['struct']
     members = expr['data']
+    features = expr.get('features')
 
     check_type(info, "'data' for struct '%s'" % name, members,
                allow_dict=True, allow_optional=True)
     check_type(info, "'base' for struct '%s'" % name, expr.get('base'),
                allow_metas=['struct'])
+
+    if features:
+        if not isinstance(features, list):
+            raise QAPISemError(info,
+                               "Struct '%s' requires an array for 'features'" %
+                               name)
+        for f in features:
+            assert isinstance(f, dict)
+            check_known_keys(info, "feature of struct %s" % name, f,
+                             ['name'], ['if'])
+
+            check_if(f, info)
+            check_name(info, "Feature of struct %s" % name, f['name'])
 
 
 def check_known_keys(info, source, keys, required, optional):
@@ -948,6 +1085,12 @@ def normalize_members(members):
             members[key] = {'type': arg}
 
 
+def normalize_features(features):
+    if isinstance(features, list):
+        features[:] = [f if isinstance(f, dict) else {'name': f}
+                       for f in features]
+
+
 def check_exprs(exprs):
     global all_names
 
@@ -986,8 +1129,10 @@ def check_exprs(exprs):
             normalize_members(expr['data'])
         elif 'struct' in expr:
             meta = 'struct'
-            check_keys(expr_elem, 'struct', ['data'], ['base', 'if'])
+            check_keys(expr_elem, 'struct', ['data'],
+                       ['base', 'if', 'features'])
             normalize_members(expr['data'])
+            normalize_features(expr.get('features'))
             struct_types[expr[meta]] = expr
         elif 'command' in expr:
             meta = 'command'
@@ -1089,6 +1234,9 @@ class QAPISchemaEntity(object):
             self.ifcond = typ.ifcond
         else:
             self.ifcond = listify_cond(self._ifcond)
+        if self.info:
+            self.module = os.path.relpath(self.info['file'],
+                                          os.path.dirname(schema.fname))
 
     def is_implicit(self):
         return not self.info
@@ -1123,10 +1271,12 @@ class QAPISchemaVisitor(object):
     def visit_array_type(self, name, info, ifcond, element_type):
         pass
 
-    def visit_object_type(self, name, info, ifcond, base, members, variants):
+    def visit_object_type(self, name, info, ifcond, base, members, variants,
+                          features):
         pass
 
-    def visit_object_type_flat(self, name, info, ifcond, members, variants):
+    def visit_object_type_flat(self, name, info, ifcond, members, variants,
+                               features):
         pass
 
     def visit_alternate_type(self, name, info, ifcond, variants):
@@ -1262,6 +1412,7 @@ class QAPISchemaArrayType(QAPISchemaType):
         self.element_type = schema.lookup_type(self._element_type_name)
         assert self.element_type
         self.element_type.check(schema)
+        self.module = self.element_type.module
         self.ifcond = self.element_type.ifcond
 
     def is_implicit(self):
@@ -1286,7 +1437,7 @@ class QAPISchemaArrayType(QAPISchemaType):
 
 class QAPISchemaObjectType(QAPISchemaType):
     def __init__(self, name, info, doc, ifcond,
-                 base, local_members, variants):
+                 base, local_members, variants, features):
         # struct has local_members, optional base, and no variants
         # flat union has base, variants, and no local_members
         # simple union has local_members, variants, and no base
@@ -1298,11 +1449,15 @@ class QAPISchemaObjectType(QAPISchemaType):
         if variants is not None:
             assert isinstance(variants, QAPISchemaObjectTypeVariants)
             variants.set_owner(name)
+        for f in features:
+            assert isinstance(f, QAPISchemaFeature)
+            f.set_owner(name)
         self._base_name = base
         self.base = None
         self.local_members = local_members
         self.variants = variants
         self.members = None
+        self.features = features
 
     def check(self, schema):
         QAPISchemaType.check(self, schema)
@@ -1328,6 +1483,12 @@ class QAPISchemaObjectType(QAPISchemaType):
             self.variants.check(schema, seen)
             assert self.variants.tag_member in self.members
             self.variants.check_clash(self.info, seen)
+
+        # Features are in a name space separate from members
+        seen = {}
+        for f in self.features:
+            f.check_clash(self.info, seen)
+
         if self.doc:
             self.doc.check()
 
@@ -1364,12 +1525,15 @@ class QAPISchemaObjectType(QAPISchemaType):
 
     def visit(self, visitor):
         visitor.visit_object_type(self.name, self.info, self.ifcond,
-                                  self.base, self.local_members, self.variants)
+                                  self.base, self.local_members, self.variants,
+                                  self.features)
         visitor.visit_object_type_flat(self.name, self.info, self.ifcond,
-                                       self.members, self.variants)
+                                       self.members, self.variants,
+                                       self.features)
 
 
 class QAPISchemaMember(object):
+    """ Represents object members, enum members and features """
     role = 'member'
 
     def __init__(self, name, ifcond=None):
@@ -1413,6 +1577,10 @@ class QAPISchemaMember(object):
 
     def describe(self):
         return "'%s' %s" % (self.name, self._pretty_owner())
+
+
+class QAPISchemaFeature(QAPISchemaMember):
+    role = 'feature'
 
 
 class QAPISchemaObjectTypeMember(QAPISchemaMember):
@@ -1603,7 +1771,7 @@ class QAPISchemaEvent(QAPISchemaEntity):
 
 class QAPISchema(object):
     def __init__(self, fname):
-        self._fname = fname
+        self.fname = fname
         if sys.version_info[0] >= 3:
             f = open(fname, 'r', encoding='utf-8')
         else:
@@ -1626,9 +1794,6 @@ class QAPISchema(object):
         self._entity_list.append(ent)
         if ent.name is not None:
             self._entity_dict[ent.name] = ent
-        if ent.info:
-            ent.module = os.path.relpath(ent.info['file'],
-                                         os.path.dirname(self._fname))
 
     def lookup_entity(self, name, typ=None):
         ent = self._entity_dict.get(name)
@@ -1674,7 +1839,7 @@ class QAPISchema(object):
                   ('null',   'null',    'QNull' + pointer_suffix)]:
             self._def_builtin_type(*t)
         self.the_empty_object_type = QAPISchemaObjectType(
-            'q_empty', None, None, None, None, [], None)
+            'q_empty', None, None, None, None, [], None, [])
         self._def_entity(self.the_empty_object_type)
 
         qtypes = ['none', 'qnull', 'qnum', 'qstring', 'qdict', 'qlist',
@@ -1683,6 +1848,9 @@ class QAPISchema(object):
 
         self._def_entity(QAPISchemaEnumType('QType', None, None, None,
                                             qtype_values, 'QTYPE'))
+
+    def _make_features(self, features):
+        return [QAPISchemaFeature(f['name'], f.get('if')) for f in features]
 
     def _make_enum_members(self, values):
         return [QAPISchemaMember(v['name'], v.get('if')) for v in values]
@@ -1720,7 +1888,7 @@ class QAPISchema(object):
             assert ifcond == typ._ifcond # pylint: disable=protected-access
         else:
             self._def_entity(QAPISchemaObjectType(name, info, doc, ifcond,
-                                                  None, members, None))
+                                                  None, members, None, []))
         return name
 
     def _def_enum_type(self, expr, info, doc):
@@ -1751,9 +1919,11 @@ class QAPISchema(object):
         base = expr.get('base')
         data = expr['data']
         ifcond = expr.get('if')
+        features = expr.get('features', [])
         self._def_entity(QAPISchemaObjectType(name, info, doc, ifcond, base,
                                               self._make_members(data, info),
-                                              None))
+                                              None,
+                                              self._make_features(features)))
 
     def _make_variant(self, case, typ, ifcond):
         return QAPISchemaObjectTypeVariant(case, typ, ifcond)
@@ -1794,7 +1964,7 @@ class QAPISchema(object):
             QAPISchemaObjectType(name, info, doc, ifcond, base, members,
                                  QAPISchemaObjectTypeVariants(tag_name,
                                                               tag_member,
-                                                              variants)))
+                                                              variants), []))
 
     def _def_alternate_type(self, expr, info, doc):
         name = expr['alternate']
@@ -2017,8 +2187,8 @@ def mcgen(code, **kwds):
     return cgen(code, **kwds)
 
 
-def guardname(filename):
-    return re.sub(r'[^A-Za-z0-9_]', '_', filename).upper()
+def c_fname(filename):
+    return re.sub(r'[^A-Za-z0-9_]', '_', filename)
 
 
 def guardstart(name):
@@ -2027,7 +2197,7 @@ def guardstart(name):
 #define %(name)s
 
 ''',
-                 name=guardname(name))
+                 name=c_fname(name).upper())
 
 
 def guardend(name):
@@ -2035,7 +2205,7 @@ def guardend(name):
 
 #endif /* %(name)s */
 ''',
-                 name=guardname(name))
+                 name=c_fname(name).upper())
 
 
 def gen_if(ifcond):
@@ -2158,7 +2328,8 @@ def build_params(arg_type, boxed, extra=None):
 
 class QAPIGen(object):
 
-    def __init__(self):
+    def __init__(self, fname):
+        self.fname = fname
         self._preamble = ''
         self._body = ''
 
@@ -2168,18 +2339,17 @@ class QAPIGen(object):
     def add(self, text):
         self._body += text
 
-    def get_content(self, fname=None):
-        return (self._top(fname) + self._preamble + self._body
-                + self._bottom(fname))
+    def get_content(self):
+        return self._top() + self._preamble + self._body + self._bottom()
 
-    def _top(self, fname):
+    def _top(self):
         return ''
 
-    def _bottom(self, fname):
+    def _bottom(self):
         return ''
 
-    def write(self, output_dir, fname):
-        pathname = os.path.join(output_dir, fname)
+    def write(self, output_dir):
+        pathname = os.path.join(output_dir, self.fname)
         dir = os.path.dirname(pathname)
         if dir:
             try:
@@ -2192,7 +2362,7 @@ class QAPIGen(object):
             f = open(fd, 'r+', encoding='utf-8')
         else:
             f = os.fdopen(fd, 'r+')
-        text = self.get_content(fname)
+        text = self.get_content()
         oldtext = f.read(len(text) + 1)
         if text != oldtext:
             f.seek(0)
@@ -2229,8 +2399,8 @@ def ifcontext(ifcond, *args):
 
 class QAPIGenCCode(QAPIGen):
 
-    def __init__(self):
-        QAPIGen.__init__(self)
+    def __init__(self, fname):
+        QAPIGen.__init__(self, fname)
         self._start_if = None
 
     def start_if(self, ifcond):
@@ -2248,20 +2418,20 @@ class QAPIGenCCode(QAPIGen):
         self._preamble = _wrap_ifcond(self._start_if[0],
                                       self._start_if[2], self._preamble)
 
-    def get_content(self, fname=None):
+    def get_content(self):
         assert self._start_if is None
-        return QAPIGen.get_content(self, fname)
+        return QAPIGen.get_content(self)
 
 
 class QAPIGenC(QAPIGenCCode):
 
-    def __init__(self, blurb, pydoc):
-        QAPIGenCCode.__init__(self)
+    def __init__(self, fname, blurb, pydoc):
+        QAPIGenCCode.__init__(self, fname)
         self._blurb = blurb
         self._copyright = '\n * '.join(re.findall(r'^Copyright .*', pydoc,
                                                   re.MULTILINE))
 
-    def _top(self, fname):
+    def _top(self):
         return mcgen('''
 /* AUTOMATICALLY GENERATED, DO NOT MODIFY */
 
@@ -2277,28 +2447,28 @@ class QAPIGenC(QAPIGenCCode):
 ''',
                      blurb=self._blurb, copyright=self._copyright)
 
-    def _bottom(self, fname):
+    def _bottom(self):
         return mcgen('''
 
 /* Dummy declaration to prevent empty .o file */
-char dummy_%(name)s;
+char qapi_dummy_%(name)s;
 ''',
-                     name=c_name(fname))
+                     name=c_fname(self.fname))
 
 
 class QAPIGenH(QAPIGenC):
 
-    def _top(self, fname):
-        return QAPIGenC._top(self, fname) + guardstart(fname)
+    def _top(self):
+        return QAPIGenC._top(self) + guardstart(self.fname)
 
-    def _bottom(self, fname):
-        return guardend(fname)
+    def _bottom(self):
+        return guardend(self.fname)
 
 
 class QAPIGenDoc(QAPIGen):
 
-    def _top(self, fname):
-        return (QAPIGen._top(self, fname)
+    def _top(self):
+        return (QAPIGen._top(self)
                 + '@c AUTOMATICALLY GENERATED, DO NOT MODIFY\n\n')
 
 
@@ -2307,12 +2477,14 @@ class QAPISchemaMonolithicCVisitor(QAPISchemaVisitor):
     def __init__(self, prefix, what, blurb, pydoc):
         self._prefix = prefix
         self._what = what
-        self._genc = QAPIGenC(blurb, pydoc)
-        self._genh = QAPIGenH(blurb, pydoc)
+        self._genc = QAPIGenC(self._prefix + self._what + '.c',
+                              blurb, pydoc)
+        self._genh = QAPIGenH(self._prefix + self._what + '.h',
+                              blurb, pydoc)
 
     def write(self, output_dir):
-        self._genc.write(output_dir, self._prefix + self._what + '.c')
-        self._genh.write(output_dir, self._prefix + self._what + '.h')
+        self._genc.write(output_dir)
+        self._genh.write(output_dir)
 
 
 class QAPISchemaModularCVisitor(QAPISchemaVisitor):
@@ -2335,22 +2507,31 @@ class QAPISchemaModularCVisitor(QAPISchemaVisitor):
     def _is_builtin_module(name):
         return not name
 
+    def _module_dirname(self, what, name):
+        if self._is_user_module(name):
+            return os.path.dirname(name)
+        return ''
+
     def _module_basename(self, what, name):
         ret = '' if self._is_builtin_module(name) else self._prefix
         if self._is_user_module(name):
-            dirname, basename = os.path.split(name)
+            basename = os.path.basename(name)
             ret += what
             if name != self._main_module:
                 ret += '-' + os.path.splitext(basename)[0]
-            ret = os.path.join(dirname, ret)
         else:
             name = name[2:] if name else 'builtin'
             ret += re.sub(r'-', '-' + name + '-', what)
         return ret
 
+    def _module_filename(self, what, name):
+        return os.path.join(self._module_dirname(what, name),
+                            self._module_basename(what, name))
+
     def _add_module(self, name, blurb):
-        genc = QAPIGenC(blurb, self._pydoc)
-        genh = QAPIGenH(blurb, self._pydoc)
+        basename = self._module_filename(self._what, name)
+        genc = QAPIGenC(basename + '.c', blurb, self._pydoc)
+        genh = QAPIGenH(basename + '.h', blurb, self._pydoc)
         self._module[name] = (genc, genh)
         self._set_module(name)
 
@@ -2370,10 +2551,9 @@ class QAPISchemaModularCVisitor(QAPISchemaVisitor):
         for name in self._module:
             if self._is_builtin_module(name) and not opt_builtins:
                 continue
-            basename = self._module_basename(self._what, name)
             (genc, genh) = self._module[name]
-            genc.write(output_dir, basename + '.c')
-            genh.write(output_dir, basename + '.h')
+            genc.write(output_dir)
+            genh.write(output_dir)
 
     def _begin_user_module(self, name):
         pass
@@ -2391,8 +2571,9 @@ class QAPISchemaModularCVisitor(QAPISchemaVisitor):
             self._begin_user_module(name)
 
     def visit_include(self, name, info):
-        basename = self._module_basename(self._what, name)
+        relname = os.path.relpath(self._module_filename(self._what, name),
+                                  os.path.dirname(self._genh.fname))
         self._genh.preamble_add(mcgen('''
-#include "%(basename)s.h"
+#include "%(relname)s.h"
 ''',
-                                      basename=basename))
+                                      relname=relname))

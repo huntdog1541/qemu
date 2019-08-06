@@ -4,6 +4,7 @@
 #include "hw/qdev.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "sysemu/sysemu.h"
 #include "monitor/monitor.h"
 #include "trace.h"
@@ -499,6 +500,10 @@ static void usb_mask_to_str(char *dest, size_t size,
                             pos ? "+" : "",
                             speeds[i].name);
         }
+    }
+
+    if (pos == 0) {
+        snprintf(dest, size, "unknown");
     }
 }
 

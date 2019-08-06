@@ -13,6 +13,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "qapi/error.h"
 #include "qapi/qapi-visit-sockets.h"
 #include "qapi/qapi-visit-block-core.h"
@@ -21,6 +22,7 @@
 #include "qapi/qobject-output-visitor.h"
 #include "qemu/uri.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/sockets.h"
 #include "block/block_int.h"
@@ -1800,7 +1802,8 @@ static int sd_prealloc(BlockDriverState *bs, int64_t old_size, int64_t new_size,
     void *buf = NULL;
     int ret;
 
-    blk = blk_new(BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE | BLK_PERM_RESIZE,
+    blk = blk_new(bdrv_get_aio_context(bs),
+                  BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE | BLK_PERM_RESIZE,
                   BLK_PERM_ALL);
 
     ret = blk_insert_bs(blk, bs, errp);
@@ -3203,6 +3206,15 @@ static QemuOptsList sd_create_opts = {
     }
 };
 
+static const char *const sd_strong_runtime_opts[] = {
+    "vdi",
+    "snap-id",
+    "tag",
+    "server.",
+
+    NULL
+};
+
 static BlockDriver bdrv_sheepdog = {
     .format_name                  = "sheepdog",
     .protocol_name                = "sheepdog",
@@ -3238,6 +3250,7 @@ static BlockDriver bdrv_sheepdog = {
     .bdrv_attach_aio_context      = sd_attach_aio_context,
 
     .create_opts                  = &sd_create_opts,
+    .strong_runtime_opts          = sd_strong_runtime_opts,
 };
 
 static BlockDriver bdrv_sheepdog_tcp = {
@@ -3275,6 +3288,7 @@ static BlockDriver bdrv_sheepdog_tcp = {
     .bdrv_attach_aio_context      = sd_attach_aio_context,
 
     .create_opts                  = &sd_create_opts,
+    .strong_runtime_opts          = sd_strong_runtime_opts,
 };
 
 static BlockDriver bdrv_sheepdog_unix = {
@@ -3312,6 +3326,7 @@ static BlockDriver bdrv_sheepdog_unix = {
     .bdrv_attach_aio_context      = sd_attach_aio_context,
 
     .create_opts                  = &sd_create_opts,
+    .strong_runtime_opts          = sd_strong_runtime_opts,
 };
 
 static void bdrv_sheepdog_init(void)

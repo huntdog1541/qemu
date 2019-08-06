@@ -26,7 +26,6 @@
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "internals.h"
-#include "hw/arm/arm.h"
 
 static bool have_guest_debug;
 
@@ -653,6 +652,11 @@ int kvm_arch_init_vcpu(CPUState *cs)
     kvm_arm_init_serror_injection(cs);
 
     return kvm_arm_init_cpreg_list(cpu);
+}
+
+int kvm_arch_destroy_vcpu(CPUState *cs)
+{
+    return 0;
 }
 
 bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx)

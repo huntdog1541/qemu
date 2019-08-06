@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
+#include "qemu/module.h"
 
 #define TYPE_MAX7310 "max7310"
 #define MAX7310(obj) OBJECT_CHECK(MAX7310State, (obj), TYPE_MAX7310)
@@ -39,7 +40,7 @@ static void max7310_reset(DeviceState *dev)
     s->command = 0x00;
 }
 
-static int max7310_rx(I2CSlave *i2c)
+static uint8_t max7310_rx(I2CSlave *i2c)
 {
     MAX7310State *s = MAX7310(i2c);
 

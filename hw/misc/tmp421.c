@@ -29,6 +29,7 @@
 #include "hw/i2c/i2c.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
+#include "qemu/module.h"
 
 /* Manufacturer / Device ID's */
 #define TMP421_MANUFACTURER_ID          0x55
@@ -249,7 +250,7 @@ static void tmp421_write(TMP421State *s)
     }
 }
 
-static int tmp421_rx(I2CSlave *i2c)
+static uint8_t tmp421_rx(I2CSlave *i2c)
 {
     TMP421State *s = TMP421(i2c);
 

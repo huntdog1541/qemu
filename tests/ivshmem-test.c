@@ -74,7 +74,7 @@ static inline unsigned in_reg(IVState *s, enum Reg reg)
     unsigned res;
 
     res = qpci_io_readl(s->dev, s->reg_bar, reg);
-    g_test_message("*%s -> %x\n", name, res);
+    g_test_message("*%s -> %x", name, res);
 
     return res;
 }
@@ -83,7 +83,7 @@ static inline void out_reg(IVState *s, enum Reg reg, unsigned v)
 {
     const char *name = reg2str(reg);
 
-    g_test_message("%x -> *%s\n", v, name);
+    g_test_message("%x -> *%s", v, name);
     qpci_io_writel(s->dev, s->reg_bar, reg, v);
 }
 
@@ -383,18 +383,21 @@ static void test_ivshmem_server(void)
 
 static void test_ivshmem_hotplug(void)
 {
+    QTestState *qts;
     const char *arch = qtest_get_arch();
 
-    qtest_start("-object memory-backend-ram,size=1M,id=mb1");
+    qts = qtest_init("-object memory-backend-ram,size=1M,id=mb1");
 
+    global_qtest = qts;  /* TODO: Get rid of global_qtest here */
     qtest_qmp_device_add("ivshmem-plain", "iv1",
                          "{'addr': %s, 'memdev': 'mb1'}",
                          stringify(PCI_SLOT_HP));
     if (strcmp(arch, "ppc64") != 0) {
-        qpci_unplug_acpi_device_test("iv1", PCI_SLOT_HP);
+        qpci_unplug_acpi_device_test(qts, "iv1", PCI_SLOT_HP);
     }
 
-    qtest_end();
+    qtest_quit(qts);
+    global_qtest = NULL;
 }
 
 static void test_ivshmem_memdev(void)

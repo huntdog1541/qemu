@@ -16,6 +16,7 @@
 
 #include "qapi/qapi-builtin-types.h"
 #include "qemu/queue.h"
+#include "qemu/module.h"
 
 struct TypeImpl;
 typedef struct TypeImpl *Type;
@@ -677,6 +678,9 @@ Object *object_new_with_propv(const char *typename,
 
 void object_apply_global_props(Object *obj, const GPtrArray *props,
                                Error **errp);
+void object_set_machine_compat_props(GPtrArray *compat_props);
+void object_set_accelerator_compat_props(GPtrArray *compat_props);
+void object_apply_compat_props(Object *obj);
 
 /**
  * object_set_props:

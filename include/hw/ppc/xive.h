@@ -140,6 +140,7 @@
 #ifndef PPC_XIVE_H
 #define PPC_XIVE_H
 
+#include "sysemu/kvm.h"
 #include "hw/qdev-core.h"
 #include "hw/sysbus.h"
 #include "hw/ppc/xive_regs.h"
@@ -193,6 +194,10 @@ typedef struct XiveSource {
     uint64_t        esb_flags;
     uint32_t        esb_shift;
     MemoryRegion    esb_mmio;
+
+    /* KVM support */
+    void            *esb_mmap;
+    MemoryRegion    esb_mmio_kvm;
 
     XiveNotifier    *xive;
 } XiveSource;
@@ -313,7 +318,8 @@ typedef struct XiveTCTX {
     DeviceState parent_obj;
 
     CPUState    *cs;
-    qemu_irq    output;
+    qemu_irq    hv_output;
+    qemu_irq    os_output;
 
     uint8_t     regs[XIVE_TM_RING_COUNT * XIVE_TM_RING_SIZE];
 } XiveTCTX;
@@ -364,6 +370,7 @@ int xive_router_get_nvt(XiveRouter *xrtr, uint8_t nvt_blk, uint32_t nvt_idx,
 int xive_router_write_nvt(XiveRouter *xrtr, uint8_t nvt_blk, uint32_t nvt_idx,
                           XiveNVT *nvt, uint8_t word_number);
 XiveTCTX *xive_router_get_tctx(XiveRouter *xrtr, CPUState *cs);
+void xive_router_notify(XiveNotifier *xn, uint32_t lisn);
 
 /*
  * XIVE END ESBs
@@ -410,6 +417,9 @@ void xive_end_queue_pic_print_info(XiveEND *end, uint32_t width, Monitor *mon);
 #define XIVE_TM_USER_PAGE       0x3
 
 extern const MemoryRegionOps xive_tm_ops;
+void xive_tctx_tm_write(XiveTCTX *tctx, hwaddr offset, uint64_t value,
+                        unsigned size);
+uint64_t xive_tctx_tm_read(XiveTCTX *tctx, hwaddr offset, unsigned size);
 
 void xive_tctx_pic_print_info(XiveTCTX *tctx, Monitor *mon);
 Object *xive_tctx_create(Object *cpu, XiveRouter *xrtr, Error **errp);
@@ -418,5 +428,15 @@ static inline uint32_t xive_nvt_cam_line(uint8_t nvt_blk, uint32_t nvt_idx)
 {
     return (nvt_blk << 19) | nvt_idx;
 }
+
+/*
+ * KVM XIVE device helpers
+ */
+
+void kvmppc_xive_source_reset_one(XiveSource *xsrc, int srcno, Error **errp);
+void kvmppc_xive_source_set_irq(void *opaque, int srcno, int val);
+void kvmppc_xive_cpu_connect(XiveTCTX *tctx, Error **errp);
+void kvmppc_xive_cpu_synchronize_state(XiveTCTX *tctx, Error **errp);
+void kvmppc_xive_cpu_get_state(XiveTCTX *tctx, Error **errp);
 
 #endif /* PPC_XIVE_H */

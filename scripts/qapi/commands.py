@@ -239,7 +239,7 @@ class QAPISchemaGenCommandVisitor(QAPISchemaModularCVisitor):
         QAPISchemaModularCVisitor.__init__(
             self, prefix, 'qapi-commands',
             ' * Schema-defined QAPI/QMP commands', __doc__)
-        self._regy = QAPIGenCCode()
+        self._regy = QAPIGenCCode(None)
         self._visited_ret_types = {}
 
     def _begin_user_module(self, name):
@@ -249,8 +249,6 @@ class QAPISchemaGenCommandVisitor(QAPISchemaModularCVisitor):
         visit = self._module_basename('qapi-visit', name)
         self._genc.add(mcgen('''
 #include "qemu/osdep.h"
-#include "qemu-common.h"
-#include "qemu/module.h"
 #include "qapi/visitor.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qobject-output-visitor.h"

@@ -38,6 +38,7 @@
 * QEMU Guest Agent::
 * QEMU User space emulator::
 * System requirements::
+* Security::
 * Implementation notes::
 * Deprecated features::
 * Supported build platforms::
@@ -2049,6 +2050,15 @@ Malta FPGA serial device
 Cirrus (default) or any other PCI VGA graphics card
 @end itemize
 
+The Boston board emulation supports the following devices:
+
+@itemize @minus
+@item
+Xilinx FPGA, which includes a PCIe root port and an UART
+@item
+Intel EG20T PCH connects the I/O peripherals, but only the SATA bus is emulated
+@end itemize
+
 The ACER Pica emulation supports:
 
 @itemize @minus
@@ -2060,19 +2070,6 @@ PC-style IRQ and DMA controllers
 PC Keyboard
 @item
 IDE controller
-@end itemize
-
-The mipssim pseudo board emulation provides an environment similar
-to what the proprietary MIPS emulator uses for running Linux.
-It supports:
-
-@itemize @minus
-@item
-A range of MIPS CPUs, default is the 24Kf
-@item
-PC style serial port
-@item
-MIPSnet network emulation
 @end itemize
 
 The MIPS Magnum R4000 emulation supports:
@@ -2088,6 +2085,32 @@ PC Keyboard
 SCSI controller
 @item
 G364 framebuffer
+@end itemize
+
+The Fulong 2E emulation supports:
+
+@itemize @minus
+@item
+Loongson 2E CPU
+@item
+Bonito64 system controller as North Bridge
+@item
+VT82C686 chipset as South Bridge
+@item
+RTL8139D as a network card chipset
+@end itemize
+
+The mipssim pseudo board emulation provides an environment similar
+to what the proprietary MIPS emulator uses for running Linux.
+It supports:
+
+@itemize @minus
+@item
+A range of MIPS CPUs, default is the 24Kf
+@item
+PC style serial port
+@item
+MIPSnet network emulation
 @end itemize
 
 @node nanoMIPS System emulator
@@ -2855,6 +2878,8 @@ The OpteronG[345] CPU models require KVM support for RDTSCP, which was
 added with Linux 4.5 which is supported by the major distros. And even
 if RHEL7 has kernel 3.10, KVM there has the required functionality there
 to make it close to a 4.5 or newer kernel.
+
+@include docs/security.texi
 
 @include qemu-tech.texi
 

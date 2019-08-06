@@ -113,8 +113,8 @@
 # for testing use of 'str' within alternates
 { 'alternate': 'AltStrObj', 'data': { 's': 'str', 'o': 'TestStruct' } }
 
-# for testing native lists
-{ 'union': 'UserDefNativeListUnion',
+# for testing lists
+{ 'union': 'UserDefListUnion',
   'data': { 'integer': ['int'],
             's8': ['int8'],
             's16': ['int16'],
@@ -128,7 +128,11 @@
             'boolean': ['bool'],
             'string': ['str'],
             'sizes': ['size'],
-            'any': ['any'] } }
+            'any': ['any'],
+            'user': ['Status'] } } # intentional forward ref. to sub-module
+
+# for testing sub-modules
+{ 'include': 'include/sub-module.json' }
 
 # testing commands
 { 'command': 'user_def_cmd', 'data': {} }
@@ -144,7 +148,7 @@
   'returns': 'int' }
 { 'command': 'guest-sync', 'data': { 'arg': 'any' }, 'returns': 'any' }
 { 'command': 'boxed-struct', 'boxed': true, 'data': 'UserDefZero' }
-{ 'command': 'boxed-union', 'data': 'UserDefNativeListUnion', 'boxed': true }
+{ 'command': 'boxed-union', 'data': 'UserDefListUnion', 'boxed': true }
 
 # Smoke test on out-of-band and allow-preconfig-test
 { 'command': 'test-flags-command', 'allow-oob': true, 'allow-preconfig': true }
@@ -236,5 +240,44 @@
 
 { 'event': 'TestIfEvent', 'data':
   { 'foo': 'TestIfStruct',
-    'bar': { 'type': 'TestIfEnum', 'if': 'defined(TEST_IF_EVT_BAR)' } },
+    'bar': { 'type': ['TestIfEnum'], 'if': 'defined(TEST_IF_EVT_BAR)' } },
   'if': 'defined(TEST_IF_EVT) && defined(TEST_IF_STRUCT)' }
+
+# test 'features' for structs
+
+{ 'struct': 'FeatureStruct0',
+  'data': { 'foo': 'int' },
+  'features': [] }
+{ 'struct': 'FeatureStruct1',
+  'data': { 'foo': 'int' },
+  'features': [ 'feature1' ] }
+{ 'struct': 'FeatureStruct2',
+  'data': { 'foo': 'int' },
+  'features': [ { 'name': 'feature1' } ] }
+{ 'struct': 'FeatureStruct3',
+  'data': { 'foo': 'int' },
+  'features': [ 'feature1', 'feature2' ] }
+{ 'struct': 'FeatureStruct4',
+  'data': { 'namespace-test': 'int' },
+  'features': [ 'namespace-test', 'int', 'name', 'if' ] }
+
+{ 'struct': 'CondFeatureStruct1',
+  'data': { 'foo': 'int' },
+  'features': [ { 'name': 'feature1', 'if': 'defined(TEST_IF_FEATURE_1)'} ] }
+{ 'struct': 'CondFeatureStruct2',
+  'data': { 'foo': 'int' },
+  'features': [ { 'name': 'feature1', 'if': 'defined(TEST_IF_FEATURE_1)'},
+                { 'name': 'feature2', 'if': 'defined(TEST_IF_FEATURE_2)'} ] }
+{ 'struct': 'CondFeatureStruct3',
+  'data': { 'foo': 'int' },
+  'features': [ { 'name': 'feature1', 'if': [ 'defined(TEST_IF_COND_1)',
+                                              'defined(TEST_IF_COND_2)'] } ] }
+{ 'command': 'test-features',
+  'data': { 'fs0': 'FeatureStruct0',
+            'fs1': 'FeatureStruct1',
+            'fs2': 'FeatureStruct2',
+            'fs3': 'FeatureStruct3',
+            'fs4': 'FeatureStruct4',
+            'cfs1': 'CondFeatureStruct1',
+            'cfs2': 'CondFeatureStruct2',
+            'cfs3': 'CondFeatureStruct3' } }

@@ -24,6 +24,7 @@
 #include "tmp105.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
+#include "qemu/module.h"
 
 static void tmp105_interrupt_update(TMP105State *s)
 {
@@ -147,7 +148,7 @@ static void tmp105_write(TMP105State *s)
     }
 }
 
-static int tmp105_rx(I2CSlave *i2c)
+static uint8_t tmp105_rx(I2CSlave *i2c)
 {
     TMP105State *s = TMP105(i2c);
 
