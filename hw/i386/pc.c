@@ -24,7 +24,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
 #include "hw/i386/pc.h"
 #include "hw/char/serial.h"
 #include "hw/char/parallel.h"
@@ -41,11 +40,13 @@
 #include "hw/firmware/smbios.h"
 #include "hw/loader.h"
 #include "elf.h"
+#include "migration/vmstate.h"
 #include "multiboot.h"
 #include "hw/timer/mc146818rtc.h"
 #include "hw/dma/i8257.h"
 #include "hw/timer/i8254.h"
 #include "hw/input/i8042.h"
+#include "hw/irq.h"
 #include "hw/audio/pcspk.h"
 #include "hw/pci/msi.h"
 #include "hw/sysbus.h"
@@ -54,6 +55,8 @@
 #include "sysemu/numa.h"
 #include "sysemu/kvm.h"
 #include "sysemu/qtest.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "kvm_i386.h"
 #include "hw/xen/xen.h"
 #include "hw/xen/start_info.h"
@@ -73,7 +76,7 @@
 #include "qapi/error.h"
 #include "qapi/qapi-visit-common.h"
 #include "qapi/visitor.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 #include "hw/nmi.h"
 #include "hw/usb.h"
 #include "hw/i386/intel_iommu.h"
@@ -115,6 +118,9 @@ struct hpet_fw_config hpet_cfg = {.count = UINT8_MAX};
 
 /* Physical Address of PVH entry point read from kernel ELF NOTE */
 static size_t pvh_start_addr;
+
+GlobalProperty pc_compat_4_1[] = {};
+const size_t pc_compat_4_1_len = G_N_ELEMENTS(pc_compat_4_1);
 
 GlobalProperty pc_compat_4_0[] = {};
 const size_t pc_compat_4_0_len = G_N_ELEMENTS(pc_compat_4_0);
@@ -996,6 +1002,8 @@ static FWCfgState *bochs_bios_init(AddressSpace *as, PCMachineState *pcms)
     int i;
     const CPUArchIdList *cpus;
     MachineClass *mc = MACHINE_GET_CLASS(pcms);
+    MachineState *ms = MACHINE(pcms);
+    int nb_numa_nodes = ms->numa_state->num_nodes;
 
     fw_cfg = fw_cfg_init_io_dma(FW_CFG_IO_BASE, FW_CFG_IO_BASE + 4, as);
     fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
@@ -1038,7 +1046,7 @@ static FWCfgState *bochs_bios_init(AddressSpace *as, PCMachineState *pcms)
     }
     for (i = 0; i < nb_numa_nodes; i++) {
         numa_fw_cfg[pcms->apic_id_limit + 1 + i] =
-            cpu_to_le64(numa_info[i].node_mem);
+            cpu_to_le64(ms->numa_state->nodes[i].node_mem);
     }
     fw_cfg_add_bytes(fw_cfg, FW_CFG_NUMA, numa_fw_cfg,
                      (1 + pcms->apic_id_limit + nb_numa_nodes) *
@@ -1241,17 +1249,21 @@ static void load_linux(PCMachineState *pcms,
 
             /* load initrd */
             if (initrd_filename) {
+                GMappedFile *mapped_file;
                 gsize initrd_size;
                 gchar *initrd_data;
                 GError *gerr = NULL;
 
-                if (!g_file_get_contents(initrd_filename, &initrd_data,
-                            &initrd_size, &gerr)) {
+                mapped_file = g_mapped_file_new(initrd_filename, false, &gerr);
+                if (!mapped_file) {
                     fprintf(stderr, "qemu: error reading initrd %s: %s\n",
                             initrd_filename, gerr->message);
                     exit(1);
                 }
+                pcms->initrd_mapped_file = mapped_file;
 
+                initrd_data = g_mapped_file_get_contents(mapped_file);
+                initrd_size = g_mapped_file_get_length(mapped_file);
                 initrd_max = pcms->below_4g_mem_size - pcmc->acpi_data_size - 1;
                 if (initrd_size >= initrd_max) {
                     fprintf(stderr, "qemu: initrd is too large, cannot support."
@@ -1378,6 +1390,7 @@ static void load_linux(PCMachineState *pcms,
 
     /* load initrd */
     if (initrd_filename) {
+        GMappedFile *mapped_file;
         gsize initrd_size;
         gchar *initrd_data;
         GError *gerr = NULL;
@@ -1387,12 +1400,16 @@ static void load_linux(PCMachineState *pcms,
             exit(1);
         }
 
-        if (!g_file_get_contents(initrd_filename, &initrd_data,
-                                 &initrd_size, &gerr)) {
+        mapped_file = g_mapped_file_new(initrd_filename, false, &gerr);
+        if (!mapped_file) {
             fprintf(stderr, "qemu: error reading initrd %s: %s\n",
                     initrd_filename, gerr->message);
             exit(1);
         }
+        pcms->initrd_mapped_file = mapped_file;
+
+        initrd_data = g_mapped_file_get_contents(mapped_file);
+        initrd_size = g_mapped_file_get_length(mapped_file);
         if (initrd_size >= initrd_max) {
             fprintf(stderr, "qemu: initrd is too large, cannot support."
                     "(max: %"PRIu32", need %"PRId64")\n",
@@ -1759,13 +1776,14 @@ void pc_machine_done(Notifier *notifier, void *data)
 void pc_guest_info_init(PCMachineState *pcms)
 {
     int i;
+    MachineState *ms = MACHINE(pcms);
 
     pcms->apic_xrupt_override = kvm_allows_irq0_override();
-    pcms->numa_nodes = nb_numa_nodes;
+    pcms->numa_nodes = ms->numa_state->num_nodes;
     pcms->node_mem = g_malloc0(pcms->numa_nodes *
                                     sizeof *pcms->node_mem);
-    for (i = 0; i < nb_numa_nodes; i++) {
-        pcms->node_mem[i] = numa_info[i].node_mem;
+    for (i = 0; i < ms->numa_state->num_nodes; i++) {
+        pcms->node_mem[i] = ms->numa_state->nodes[i].node_mem;
     }
 
     pcms->machine_done.notify = pc_machine_done;
@@ -2403,6 +2421,14 @@ static void pc_cpu_pre_plug(HotplugHandler *hotplug_dev,
         int max_socket = (ms->smp.max_cpus - 1) /
                                 smp_threads / smp_cores / pcms->smp_dies;
 
+        /*
+         * die-id was optional in QEMU 4.0 and older, so keep it optional
+         * if there's only one die per socket.
+         */
+        if (cpu->die_id < 0 && pcms->smp_dies == 1) {
+            cpu->die_id = 0;
+        }
+
         if (cpu->socket_id < 0) {
             error_setg(errp, "CPU socket-id is not set");
             return;
@@ -2410,9 +2436,13 @@ static void pc_cpu_pre_plug(HotplugHandler *hotplug_dev,
             error_setg(errp, "Invalid CPU socket-id: %u must be in range 0:%u",
                        cpu->socket_id, max_socket);
             return;
+        }
+        if (cpu->die_id < 0) {
+            error_setg(errp, "CPU die-id is not set");
+            return;
         } else if (cpu->die_id > pcms->smp_dies - 1) {
             error_setg(errp, "Invalid CPU die-id: %u must be in range 0:%u",
-                       cpu->die_id, max_socket);
+                       cpu->die_id, pcms->smp_dies - 1);
             return;
         }
         if (cpu->core_id < 0) {
@@ -2828,6 +2858,13 @@ static void pc_machine_reset(MachineState *machine)
     }
 }
 
+static void pc_machine_wakeup(MachineState *machine)
+{
+    cpu_synchronize_all_states();
+    pc_machine_reset(machine);
+    cpu_synchronize_all_post_reset();
+}
+
 static CpuInstanceProperties
 pc_cpu_index_to_props(MachineState *ms, unsigned cpu_index)
 {
@@ -2847,7 +2884,7 @@ static int64_t pc_get_default_cpu_node_id(const MachineState *ms, int idx)
    x86_topo_ids_from_apicid(ms->possible_cpus->cpus[idx].arch_id,
                             pcms->smp_dies, ms->smp.cores,
                             ms->smp.threads, &topo);
-   return topo.pkg_id % nb_numa_nodes;
+   return topo.pkg_id % ms->numa_state->num_nodes;
 }
 
 static const CPUArchIdList *pc_possible_cpu_arch_ids(MachineState *ms)
@@ -2879,8 +2916,10 @@ static const CPUArchIdList *pc_possible_cpu_arch_ids(MachineState *ms)
                                  ms->smp.threads, &topo);
         ms->possible_cpus->cpus[i].props.has_socket_id = true;
         ms->possible_cpus->cpus[i].props.socket_id = topo.pkg_id;
-        ms->possible_cpus->cpus[i].props.has_die_id = true;
-        ms->possible_cpus->cpus[i].props.die_id = topo.die_id;
+        if (pcms->smp_dies > 1) {
+            ms->possible_cpus->cpus[i].props.has_die_id = true;
+            ms->possible_cpus->cpus[i].props.die_id = topo.die_id;
+        }
         ms->possible_cpus->cpus[i].props.has_core_id = true;
         ms->possible_cpus->cpus[i].props.core_id = topo.core_id;
         ms->possible_cpus->cpus[i].props.has_thread_id = true;
@@ -2940,6 +2979,7 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     mc->block_default_type = IF_IDE;
     mc->max_cpus = 255;
     mc->reset = pc_machine_reset;
+    mc->wakeup = pc_machine_wakeup;
     hc->pre_plug = pc_machine_device_pre_plug_cb;
     hc->plug = pc_machine_device_plug_cb;
     hc->unplug_request = pc_machine_device_unplug_request_cb;
