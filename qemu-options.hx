@@ -32,18 +32,16 @@ DEF("machine", HAS_ARG, QEMU_OPTION_machine, \
     "                selects emulated machine ('-machine help' for list)\n"
     "                property accel=accel1[:accel2[:...]] selects accelerator\n"
     "                supported accelerators are kvm, xen, hax, hvf, whpx or tcg (default: tcg)\n"
-    "                kernel_irqchip=on|off|split controls accelerated irqchip support (default=off)\n"
     "                vmport=on|off|auto controls emulation of vmport (default: auto)\n"
-    "                kvm_shadow_mem=size of KVM shadow MMU in bytes\n"
     "                dump-guest-core=on|off include guest memory in a core dump (default=on)\n"
     "                mem-merge=on|off controls memory merge support (default: on)\n"
-    "                igd-passthru=on|off controls IGD GFX passthrough support (default=off)\n"
     "                aes-key-wrap=on|off controls support for AES key wrapping (default=on)\n"
     "                dea-key-wrap=on|off controls support for DEA key wrapping (default=on)\n"
     "                suppress-vmdesc=on|off disables self-describing migration (default=off)\n"
     "                nvdimm=on|off controls NVDIMM support (default=off)\n"
     "                enforce-config-section=on|off enforce configuration section migration (default=off)\n"
-    "                memory-encryption=@var{} memory encryption object to use (default=none)\n",
+    "                memory-encryption=@var{} memory encryption object to use (default=none)\n"
+    "                hmat=on|off controls ACPI HMAT support (default=off)\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -machine [type=]@var{name}[,prop=@var{value}[,...]]
@@ -69,16 +67,10 @@ This is used to enable an accelerator. Depending on the target architecture,
 kvm, xen, hax, hvf, whpx or tcg can be available. By default, tcg is used. If there is
 more than one accelerator specified, the next one is used if the previous one
 fails to initialize.
-@item kernel_irqchip=on|off
-Controls in-kernel irqchip support for the chosen accelerator when available.
-@item gfx_passthru=on|off
-Enables IGD GFX passthrough support for the chosen machine when available.
 @item vmport=on|off|auto
 Enables emulation of VMWare IO port, for vmmouse etc. auto says to select the
 value based on accel. For accel=xen the default is off otherwise the default
 is on.
-@item kvm_shadow_mem=size
-Defines the size of the KVM shadow MMU.
 @item dump-guest-core=on|off
 Include guest memory in a core dump. The default is on.
 @item mem-merge=on|off
@@ -103,6 +95,9 @@ NOTE: this parameter is deprecated. Please use @option{-global}
 @option{migration.send-configuration}=@var{on|off} instead.
 @item memory-encryption=@var{}
 Memory encryption object to use. The default is none.
+@item hmat=on|off
+Enables or disables ACPI Heterogeneous Memory Attribute Table (HMAT) support.
+The default is off.
 @end table
 ETEXI
 
@@ -118,8 +113,12 @@ Select CPU model (@code{-cpu help} for list and additional feature selection)
 ETEXI
 
 DEF("accel", HAS_ARG, QEMU_OPTION_accel,
-    "-accel [accel=]accelerator[,thread=single|multi]\n"
+    "-accel [accel=]accelerator[,prop[=value][,...]]\n"
     "                select accelerator (kvm, xen, hax, hvf, whpx or tcg; use 'help' for a list)\n"
+    "                igd-passthru=on|off (enable Xen integrated Intel graphics passthrough, default=off)\n"
+    "                kernel-irqchip=on|off|split controls accelerated irqchip support (default=on)\n"
+    "                kvm-shadow-mem=size of KVM shadow MMU in bytes\n"
+    "                tb-size=n (TCG translation block cache size)\n"
     "                thread=single|multi (enable multi-threaded TCG)\n", QEMU_ARCH_ALL)
 STEXI
 @item -accel @var{name}[,prop=@var{value}[,...]]
@@ -129,6 +128,18 @@ kvm, xen, hax, hvf, whpx or tcg can be available. By default, tcg is used. If th
 more than one accelerator specified, the next one is used if the previous one
 fails to initialize.
 @table @option
+@item igd-passthru=on|off
+When Xen is in use, this option controls whether Intel integrated graphics
+devices can be passed through to the guest (default=off)
+@item kernel-irqchip=on|off|split
+Controls KVM in-kernel irqchip support.  The default is full acceleration of the
+interrupt controllers.  On x86, split irqchip reduces the kernel attack
+surface, at a performance cost for non-MSI interrupts.  Disabling the in-kernel
+irqchip completely is not recommended except for debugging purposes.
+@item kvm-shadow-mem=size
+Defines the size of the KVM shadow MMU.
+@item tb-size=@var{n}
+Controls the size (in MiB) of the TCG translation block cache.
 @item thread=single|multi
 Controls number of TCG threads. When the TCG is multi-threaded there will be one
 thread per vCPU therefor taking advantage of additional host cores. The default
@@ -161,19 +172,24 @@ If any on the three values is given, the total number of CPUs @var{n} can be omi
 ETEXI
 
 DEF("numa", HAS_ARG, QEMU_OPTION_numa,
-    "-numa node[,mem=size][,cpus=firstcpu[-lastcpu]][,nodeid=node]\n"
-    "-numa node[,memdev=id][,cpus=firstcpu[-lastcpu]][,nodeid=node]\n"
+    "-numa node[,mem=size][,cpus=firstcpu[-lastcpu]][,nodeid=node][,initiator=node]\n"
+    "-numa node[,memdev=id][,cpus=firstcpu[-lastcpu]][,nodeid=node][,initiator=node]\n"
     "-numa dist,src=source,dst=destination,val=distance\n"
-    "-numa cpu,node-id=node[,socket-id=x][,core-id=y][,thread-id=z]\n",
+    "-numa cpu,node-id=node[,socket-id=x][,core-id=y][,thread-id=z]\n"
+    "-numa hmat-lb,initiator=node,target=node,hierarchy=memory|first-level|second-level|third-level,data-type=access-latency|read-latency|write-latency[,latency=lat][,bandwidth=bw]\n"
+    "-numa hmat-cache,node-id=node,size=size,level=level[,associativity=none|direct|complex][,policy=none|write-back|write-through][,line=size]\n",
     QEMU_ARCH_ALL)
 STEXI
-@item -numa node[,mem=@var{size}][,cpus=@var{firstcpu}[-@var{lastcpu}]][,nodeid=@var{node}]
-@itemx -numa node[,memdev=@var{id}][,cpus=@var{firstcpu}[-@var{lastcpu}]][,nodeid=@var{node}]
+@item -numa node[,mem=@var{size}][,cpus=@var{firstcpu}[-@var{lastcpu}]][,nodeid=@var{node}][,initiator=@var{initiator}]
+@itemx -numa node[,memdev=@var{id}][,cpus=@var{firstcpu}[-@var{lastcpu}]][,nodeid=@var{node}][,initiator=@var{initiator}]
 @itemx -numa dist,src=@var{source},dst=@var{destination},val=@var{distance}
 @itemx -numa cpu,node-id=@var{node}[,socket-id=@var{x}][,core-id=@var{y}][,thread-id=@var{z}]
+@itemx -numa hmat-lb,initiator=@var{node},target=@var{node},hierarchy=@var{hierarchy},data-type=@var{tpye}[,latency=@var{lat}][,bandwidth=@var{bw}]
+@itemx -numa hmat-cache,node-id=@var{node},size=@var{size},level=@var{level}[,associativity=@var{str}][,policy=@var{str}][,line=@var{size}]
 @findex -numa
 Define a NUMA node and assign RAM and VCPUs to it.
 Set the NUMA distance from a source node to a destination node.
+Set the ACPI Heterogeneous Memory Attributes for the given nodes.
 
 Legacy VCPU assignment uses @samp{cpus} option where
 @var{firstcpu} and @var{lastcpu} are CPU indexes. Each
@@ -215,6 +231,27 @@ split equally between them.
 @samp{mem} and @samp{memdev} are mutually exclusive. Furthermore,
 if one node uses @samp{memdev}, all of them have to use it.
 
+@samp{initiator} is an additional option that points to an @var{initiator}
+NUMA node that has best performance (the lowest latency or largest bandwidth)
+to this NUMA @var{node}. Note that this option can be set only when
+the machine property 'hmat' is set to 'on'.
+
+Following example creates a machine with 2 NUMA nodes, node 0 has CPU.
+node 1 has only memory, and its initiator is node 0. Note that because
+node 0 has CPU, by default the initiator of node 0 is itself and must be
+itself.
+@example
+-machine hmat=on \
+-m 2G,slots=2,maxmem=4G \
+-object memory-backend-ram,size=1G,id=m0 \
+-object memory-backend-ram,size=1G,id=m1 \
+-numa node,nodeid=0,memdev=m0 \
+-numa node,nodeid=1,memdev=m1,initiator=0 \
+-smp 2,sockets=2,maxcpus=2  \
+-numa cpu,node-id=0,socket-id=0 \
+-numa cpu,node-id=0,socket-id=1
+@end example
+
 @var{source} and @var{destination} are NUMA node IDs.
 @var{distance} is the NUMA distance from @var{source} to @var{destination}.
 The distance from a node to itself is always 10. If any pair of nodes is
@@ -230,6 +267,59 @@ Note that the -@option{numa} option doesn't allocate any of the
 specified resources, it just assigns existing resources to NUMA
 nodes. This means that one still has to use the @option{-m},
 @option{-smp} options to allocate RAM and VCPUs respectively.
+
+Use @samp{hmat-lb} to set System Locality Latency and Bandwidth Information
+between initiator and target NUMA nodes in ACPI Heterogeneous Attribute Memory Table (HMAT).
+Initiator NUMA node can create memory requests, usually it has one or more processors.
+Target NUMA node contains addressable memory.
+
+In @samp{hmat-lb} option, @var{node} are NUMA node IDs. @var{hierarchy} is the memory
+hierarchy of the target NUMA node: if @var{hierarchy} is 'memory', the structure
+represents the memory performance; if @var{hierarchy} is 'first-level|second-level|third-level',
+this structure represents aggregated performance of memory side caches for each domain.
+@var{type} of 'data-type' is type of data represented by this structure instance:
+if 'hierarchy' is 'memory', 'data-type' is 'access|read|write' latency or 'access|read|write'
+bandwidth of the target memory; if 'hierarchy' is 'first-level|second-level|third-level',
+'data-type' is 'access|read|write' hit latency or 'access|read|write' hit bandwidth of the
+target memory side cache.
+
+@var{lat} is latency value in nanoseconds. @var{bw} is bandwidth value,
+the possible value and units are NUM[M|G|T], mean that the bandwidth value are
+NUM byte per second (or MB/s, GB/s or TB/s depending on used suffix).
+Note that if latency or bandwidth value is 0, means the corresponding latency or
+bandwidth information is not provided.
+
+In @samp{hmat-cache} option, @var{node-id} is the NUMA-id of the memory belongs.
+@var{size} is the size of memory side cache in bytes. @var{level} is the cache
+level described in this structure, note that the cache level 0 should not be used
+with @samp{hmat-cache} option. @var{associativity} is the cache associativity,
+the possible value is 'none/direct(direct-mapped)/complex(complex cache indexing)'.
+@var{policy} is the write policy. @var{line} is the cache Line size in bytes.
+
+For example, the following options describe 2 NUMA nodes. Node 0 has 2 cpus and
+a ram, node 1 has only a ram. The processors in node 0 access memory in node
+0 with access-latency 5 nanoseconds, access-bandwidth is 200 MB/s;
+The processors in NUMA node 0 access memory in NUMA node 1 with access-latency 10
+nanoseconds, access-bandwidth is 100 MB/s.
+And for memory side cache information, NUMA node 0 and 1 both have 1 level memory
+cache, size is 10KB, policy is write-back, the cache Line size is 8 bytes:
+@example
+-machine hmat=on \
+-m 2G \
+-object memory-backend-ram,size=1G,id=m0 \
+-object memory-backend-ram,size=1G,id=m1 \
+-smp 2 \
+-numa node,nodeid=0,memdev=m0 \
+-numa node,nodeid=1,memdev=m1,initiator=0 \
+-numa cpu,node-id=0,socket-id=0 \
+-numa cpu,node-id=0,socket-id=1 \
+-numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-latency,latency=5 \
+-numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=200M \
+-numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=10 \
+-numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=100M \
+-numa hmat-cache,node-id=0,size=10K,level=1,associativity=direct,policy=write-back,line=8 \
+-numa hmat-cache,node-id=1,size=10K,level=1,associativity=direct,policy=write-back,line=8
+@end example
 
 ETEXI
 
@@ -433,19 +523,20 @@ DEF("audiodev", HAS_ARG, QEMU_OPTION_audiodev,
     "                specifies the audio backend to use\n"
     "                id= identifier of the backend\n"
     "                timer-period= timer period in microseconds\n"
+    "                in|out.mixing-engine= use mixing engine to mix streams inside QEMU\n"
     "                in|out.fixed-settings= use fixed settings for host audio\n"
     "                in|out.frequency= frequency to use with fixed settings\n"
     "                in|out.channels= number of channels to use with fixed settings\n"
     "                in|out.format= sample format to use with fixed settings\n"
     "                valid values: s8, s16, s32, u8, u16, u32\n"
     "                in|out.voices= number of voices to use\n"
-    "                in|out.buffer-len= length of buffer in microseconds\n"
+    "                in|out.buffer-length= length of buffer in microseconds\n"
     "-audiodev none,id=id,[,prop[=value][,...]]\n"
     "                dummy driver that discards all output\n"
 #ifdef CONFIG_AUDIO_ALSA
     "-audiodev alsa,id=id[,prop[=value][,...]]\n"
     "                in|out.dev= name of the audio device to use\n"
-    "                in|out.period-len= length of period in microseconds\n"
+    "                in|out.period-length= length of period in microseconds\n"
     "                in|out.try-poll= attempt to use poll mode\n"
     "                threshold= threshold (in microseconds) when playback starts\n"
 #endif
@@ -470,6 +561,7 @@ DEF("audiodev", HAS_ARG, QEMU_OPTION_audiodev,
     "-audiodev pa,id=id[,prop[=value][,...]]\n"
     "                server= PulseAudio server address\n"
     "                in|out.name= source/sink device name\n"
+    "                in|out.latency= desired latency in microseconds\n"
 #endif
 #ifdef CONFIG_AUDIO_SDL
     "-audiodev sdl,id=id[,prop[=value][,...]]\n"
@@ -493,6 +585,10 @@ output's property with @code{out.@var{prop}}. For example:
 -audiodev alsa,id=example,out.channels=1 # leaves in.channels unspecified
 @end example
 
+NOTE: parameter validation is known to be incomplete, in many cases
+specifying an invalid option causes QEMU to print an error message and
+continue emulation without sound.
+
 Valid global options are:
 
 @table @option
@@ -502,6 +598,16 @@ Identifies the audio backend.
 @item timer-period=@var{period}
 Sets the timer @var{period} used by the audio subsystem in microseconds.
 Default is 10000 (10 ms).
+
+@item in|out.mixing-engine=on|off
+Use QEMU's mixing engine to mix all streams inside QEMU and convert
+audio formats when not supported by the backend.  When off,
+@var{fixed-settings} must be off too.  Note that disabling this option
+means that the selected backend must support multiple streams and the
+audio formats used by the virtual cards, otherwise you'll get no sound.
+It's not recommended to disable this option unless you want to use 5.1
+or 7.1 audio, as mixing engine only supports mono and stereo audio.
+Default is on.
 
 @item in|out.fixed-settings=on|off
 Use fixed settings for host audio.  When off, it will change based on
@@ -524,7 +630,7 @@ Valid values are: @code{s8}, @code{s16}, @code{s32}, @code{u8},
 @item in|out.voices=@var{voices}
 Specify the number of @var{voices} to use.  Default is 1.
 
-@item in|out.buffer=@var{usecs}
+@item in|out.buffer-length=@var{usecs}
 Sets the size of the buffer in microseconds.
 
 @end table
@@ -545,7 +651,7 @@ ALSA specific options are:
 Specify the ALSA @var{device} to use for input and/or output.  Default
 is @code{default}.
 
-@item in|out.period-len=@var{usecs}
+@item in|out.period-length=@var{usecs}
 Sets the period length in microseconds.
 
 @item in|out.try-poll=on|off
@@ -630,6 +736,10 @@ Sets the PulseAudio @var{server} to connect to.
 @item in|out.name=@var{sink}
 Use the specified source/sink for recording/playback.
 
+@item in|out.latency=@var{usecs}
+Desired latency in microseconds.  The PulseAudio server will try to honor this
+value but actual latencies may be lower or higher.
+
 @end table
 
 @item -audiodev sdl,id=@var{id}[,@var{prop}[=@var{value}][,...]]
@@ -701,7 +811,7 @@ possible drivers and properties, use @code{-device help} and
 @code{-device @var{driver},help}.
 
 Some drivers are:
-@item -device ipmi-bmc-sim,id=@var{id}[,slave_addr=@var{val}][,sdrfile=@var{file}][,furareasize=@var{val}][,furdatafile=@var{file}]
+@item -device ipmi-bmc-sim,id=@var{id}[,slave_addr=@var{val}][,sdrfile=@var{file}][,furareasize=@var{val}][,furdatafile=@var{file}][,guid=@var{uuid}]
 
 Add an IPMI BMC.  This is a simulation of a hardware management
 interface processor that normally sits on a system.  It provides
@@ -714,8 +824,8 @@ controllers.  If you don't know what this means, it is safe to ignore
 it.
 
 @table @option
-@item bmc=@var{id}
-The BMC to connect to, one of ipmi-bmc-sim or ipmi-bmc-extern above.
+@item id=@var{id}
+The BMC id for interfaces to use this device.
 @item slave_addr=@var{val}
 Define slave address to use for the BMC.  The default is 0x20.
 @item sdrfile=@var{file}
@@ -724,6 +834,10 @@ file containing raw Sensor Data Records (SDR) data. The default is none.
 size of a Field Replaceable Unit (FRU) area.  The default is 1024.
 @item frudatafile=@var{file}
 file containing raw Field Replaceable Unit (FRU) inventory data. The default is none.
+@item guid=@var{uuid}
+value for the GUID for the BMC, in standard UUID format.  If this is set,
+get "Get GUID" command to the BMC will return it.  Otherwise "Get GUID"
+will return an error.
 @end table
 
 @item -device ipmi-bmc-extern,id=@var{id},chardev=@var{id}[,slave_addr=@var{val}]
@@ -839,13 +953,14 @@ STEXI
 @findex -cdrom
 Use @var{file} as CD-ROM image (you cannot use @option{-hdc} and
 @option{-cdrom} at the same time). You can use the host CD-ROM by
-using @file{/dev/cdrom} as filename (@pxref{host_drives}).
+using @file{/dev/cdrom} as filename.
 ETEXI
 
 DEF("blockdev", HAS_ARG, QEMU_OPTION_blockdev,
     "-blockdev [driver=]driver[,node-name=N][,discard=ignore|unmap]\n"
     "          [,cache.direct=on|off][,cache.no-flush=on|off]\n"
-    "          [,read-only=on|off][,detect-zeroes=on|off|unmap]\n"
+    "          [,read-only=on|off][,auto-read-only=on|off]\n"
+    "          [,force-share=on|off][,detect-zeroes=on|off|unmap]\n"
     "          [,driver specific parameters...]\n"
     "                configure a block backend\n", QEMU_ARCH_ALL)
 STEXI
@@ -881,6 +996,25 @@ name is not intended to be predictable and changes between QEMU invocations.
 For the top level, an explicit node name must be specified.
 @item read-only
 Open the node read-only. Guest write attempts will fail.
+
+Note that some block drivers support only read-only access, either generally or
+in certain configurations. In this case, the default value
+@option{read-only=off} does not work and the option must be specified
+explicitly.
+@item auto-read-only
+If @option{auto-read-only=on} is set, QEMU may fall back to read-only usage
+even when @option{read-only=off} is requested, or even switch between modes as
+needed, e.g. depending on whether the image file is writable or whether a
+writing user is attached to the node.
+@item force-share
+Override the image locking system of QEMU by forcing the node to utilize
+weaker shared access for permissions where it would normally request exclusive
+access.  When there is the potential for multiple instances to have the same
+file open (whether this invocation of QEMU is the first or the second
+instance), both instances must permit shared access for the second instance to
+succeed at opening the file.
+
+Enabling @option{force-share=on} requires @option{read-only=on}.
 @item cache.direct
 The host page cache can be avoided with @option{cache.direct=on}. This will
 attempt to do disk IO directly to the guest's memory. QEMU may still perform an
@@ -1335,7 +1469,7 @@ ETEXI
 
 DEF("virtfs", HAS_ARG, QEMU_OPTION_virtfs,
     "-virtfs local,path=path,mount_tag=tag,security_model=mapped-xattr|mapped-file|passthrough|none\n"
-    "        [,id=id][,writeout=immediate][,readonly][,fmode=fmode][,dmode=dmode]\n"
+    "        [,id=id][,writeout=immediate][,readonly][,fmode=fmode][,dmode=dmode][,multidevs=remap|forbid|warn]\n"
     "-virtfs proxy,mount_tag=tag,socket=socket[,id=id][,writeout=immediate][,readonly]\n"
     "-virtfs proxy,mount_tag=tag,sock_fd=sock_fd[,id=id][,writeout=immediate][,readonly]\n"
     "-virtfs synth,mount_tag=tag[,id=id][,readonly]\n",
@@ -1343,7 +1477,7 @@ DEF("virtfs", HAS_ARG, QEMU_OPTION_virtfs,
 
 STEXI
 
-@item -virtfs local,path=@var{path},mount_tag=@var{mount_tag} ,security_model=@var{security_model}[,writeout=@var{writeout}][,readonly] [,fmode=@var{fmode}][,dmode=@var{dmode}]
+@item -virtfs local,path=@var{path},mount_tag=@var{mount_tag} ,security_model=@var{security_model}[,writeout=@var{writeout}][,readonly] [,fmode=@var{fmode}][,dmode=@var{dmode}][,multidevs=@var{multidevs}]
 @itemx -virtfs proxy,socket=@var{socket},mount_tag=@var{mount_tag} [,writeout=@var{writeout}][,readonly]
 @itemx -virtfs proxy,sock_fd=@var{sock_fd},mount_tag=@var{mount_tag} [,writeout=@var{writeout}][,readonly]
 @itemx -virtfs synth,mount_tag=@var{mount_tag}
@@ -1399,17 +1533,29 @@ Specifies the default mode for newly created directories on the host. Works
 only with security models "mapped-xattr" and "mapped-file".
 @item mount_tag=@var{mount_tag}
 Specifies the tag name to be used by the guest to mount this export point.
+@item multidevs=@var{multidevs}
+Specifies how to deal with multiple devices being shared with a 9p export.
+Supported behaviours are either "remap", "forbid" or "warn". The latter is
+the default behaviour on which virtfs 9p expects only one device to be
+shared with the same export, and if more than one device is shared and
+accessed via the same 9p export then only a warning message is logged
+(once) by qemu on host side. In order to avoid file ID collisions on guest
+you should either create a separate virtfs export for each device to be
+shared with guests (recommended way) or you might use "remap" instead which
+allows you to share multiple devices with only one export instead, which is
+achieved by remapping the original inode numbers from host to guest in a
+way that would prevent such collisions. Remapping inodes in such use cases
+is required because the original device IDs from host are never passed and
+exposed on guest. Instead all files of an export shared with virtfs always
+share the same device id on guest. So two files with identical inode
+numbers but from actually different devices on host would otherwise cause a
+file ID collision and hence potential misbehaviours on guest. "forbid" on
+the other hand assumes like "warn" that only one device is shared by the
+same export, however it will not only log a warning message but also
+deny access to additional devices on guest. Note though that "forbid" does
+currently not block all possible file access operations (e.g. readdir()
+would still return entries from other devices).
 @end table
-ETEXI
-
-DEF("virtfs_synth", 0, QEMU_OPTION_virtfs_synth,
-    "-virtfs_synth Create synthetic file system image\n",
-    QEMU_ARCH_ALL)
-STEXI
-@item -virtfs_synth
-@findex -virtfs_synth
-Create synthetic file system image. Note that this option is now deprecated.
-Please use @code{-fsdev synth} and @code{-device virtio-9p-...} instead.
 ETEXI
 
 DEF("iscsi", HAS_ARG, QEMU_OPTION_iscsi,
@@ -1485,33 +1631,46 @@ STEXI
 ETEXI
 
 DEF("display", HAS_ARG, QEMU_OPTION_display,
+#if defined(CONFIG_SPICE)
     "-display spice-app[,gl=on|off]\n"
-    "-display sdl[,frame=on|off][,alt_grab=on|off][,ctrl_grab=on|off]\n"
+#endif
+#if defined(CONFIG_SDL)
+    "-display sdl[,alt_grab=on|off][,ctrl_grab=on|off]\n"
     "            [,window_close=on|off][,gl=on|core|es|off]\n"
-    "-display gtk[,grab_on_hover=on|off][,gl=on|off]|\n"
-    "-display vnc=<display>[,<optargs>]\n"
-    "-display curses[,charset=<encoding>]\n"
-    "-display none\n"
-    "-display egl-headless[,rendernode=<file>]"
-    "                select display type\n"
-    "The default display is equivalent to\n"
+#endif
 #if defined(CONFIG_GTK)
-            "\t\"-display gtk\"\n"
+    "-display gtk[,grab_on_hover=on|off][,gl=on|off]|\n"
+#endif
+#if defined(CONFIG_VNC)
+    "-display vnc=<display>[,<optargs>]\n"
+#endif
+#if defined(CONFIG_CURSES)
+    "-display curses[,charset=<encoding>]\n"
+#endif
+#if defined(CONFIG_OPENGL)
+    "-display egl-headless[,rendernode=<file>]\n"
+#endif
+    "-display none\n"
+    "                select display backend type\n"
+    "                The default display is equivalent to\n                "
+#if defined(CONFIG_GTK)
+            "\"-display gtk\"\n"
 #elif defined(CONFIG_SDL)
-            "\t\"-display sdl\"\n"
+            "\"-display sdl\"\n"
 #elif defined(CONFIG_COCOA)
-            "\t\"-display cocoa\"\n"
+            "\"-display cocoa\"\n"
 #elif defined(CONFIG_VNC)
-            "\t\"-vnc localhost:0,to=99,id=default\"\n"
+            "\"-vnc localhost:0,to=99,id=default\"\n"
 #else
-            "\t\"-display none\"\n"
+            "\"-display none\"\n"
 #endif
     , QEMU_ARCH_ALL)
 STEXI
 @item -display @var{type}
 @findex -display
 Select type of display to use. This option is a replacement for the
-old style -sdl/-curses/... options. Valid values for @var{type} are
+old style -sdl/-curses/... options. Use @code{-display help} to list
+the available display types. Valid values for @var{type} are
 @table @option
 @item sdl
 Display video output via SDL (usually in a separate graphics
@@ -1796,9 +1955,9 @@ STEXI
 Start in full screen.
 ETEXI
 
-DEF("g", 1, QEMU_OPTION_g ,
+DEF("g", HAS_ARG, QEMU_OPTION_g ,
     "-g WxH[xDEPTH]  Set the initial graphical resolution and depth\n",
-    QEMU_ARCH_PPC | QEMU_ARCH_SPARC)
+    QEMU_ARCH_PPC | QEMU_ARCH_SPARC | QEMU_ARCH_M68K)
 STEXI
 @item -g @var{width}x@var{height}[x@var{depth}]
 @findex -g
@@ -2269,8 +2428,7 @@ Use @option{model=help} to list the available device types.
 The hardware MAC address can be set with @option{mac=@var{macaddr}}.
 
 The following two example do exactly the same, to show how @option{-nic} can
-be used to shorten the command line length (note that the e1000 is the default
-on i386, so the @option{model=e1000} parameter could even be omitted here, too):
+be used to shorten the command line length:
 @example
 @value{qemu_system} -netdev user,id=n1,ipv6=off -device e1000,netdev=n1,mac=52:54:98:76:54:32
 @value{qemu_system} -nic user,ipv6=off,model=e1000,mac=52:54:98:76:54:32
@@ -2684,9 +2842,12 @@ netdev with ID @var{nd} by using the @option{netdev=@var{nd}} option.
 Legacy option to configure or create an on-board (or machine default) Network
 Interface Card(NIC) and connect it either to the emulated hub with ID 0 (i.e.
 the default hub), or to the netdev @var{nd}.
-The NIC is an e1000 by default on the PC target. Optionally, the MAC address
-can be changed to @var{mac}, the device address set to @var{addr} (PCI cards
-only), and a @var{name} can be assigned for use in monitor commands.
+If @var{model} is omitted, then the default NIC model associated with
+the machine type is used. Note that the default NIC model may change in
+future QEMU releases, so it is highly recommended to always specify a model.
+Optionally, the MAC address can be changed to @var{mac}, the device
+address set to @var{addr} (PCI cards only), and a @var{name} can be
+assigned for use in monitor commands.
 Optionally, for PCI cards, you can specify the number @var{v} of MSI-X vectors
 that the card should have; this option currently only affects virtio cards; set
 @var{v} = 0 to disable MSI-X. If no @option{-net} option is specified, a single
@@ -3040,85 +3201,6 @@ Connect to a spice virtual machine channel, such as vdiport.
 
 Connect to a spice port, allowing a Spice client to handle the traffic
 identified by a name (preferably a fqdn).
-ETEXI
-
-STEXI
-@end table
-ETEXI
-DEFHEADING()
-
-DEFHEADING(Bluetooth(R) options:)
-STEXI
-@table @option
-ETEXI
-
-DEF("bt", HAS_ARG, QEMU_OPTION_bt, \
-    "-bt hci,null    dumb bluetooth HCI - doesn't respond to commands\n" \
-    "-bt hci,host[:id]\n" \
-    "                use host's HCI with the given name\n" \
-    "-bt hci[,vlan=n]\n" \
-    "                emulate a standard HCI in virtual scatternet 'n'\n" \
-    "-bt vhci[,vlan=n]\n" \
-    "                add host computer to virtual scatternet 'n' using VHCI\n" \
-    "-bt device:dev[,vlan=n]\n" \
-    "                emulate a bluetooth device 'dev' in scatternet 'n'\n",
-    QEMU_ARCH_ALL)
-STEXI
-@item -bt hci[...]
-@findex -bt
-Defines the function of the corresponding Bluetooth HCI.  -bt options
-are matched with the HCIs present in the chosen machine type.  For
-example when emulating a machine with only one HCI built into it, only
-the first @code{-bt hci[...]} option is valid and defines the HCI's
-logic.  The Transport Layer is decided by the machine type.  Currently
-the machines @code{n800} and @code{n810} have one HCI and all other
-machines have none.
-
-Note: This option and the whole bluetooth subsystem is considered as deprecated.
-If you still use it, please send a mail to @email{qemu-devel@@nongnu.org} where
-you describe your usecase.
-
-@anchor{bt-hcis}
-The following three types are recognized:
-
-@table @option
-@item -bt hci,null
-(default) The corresponding Bluetooth HCI assumes no internal logic
-and will not respond to any HCI commands or emit events.
-
-@item -bt hci,host[:@var{id}]
-(@code{bluez} only) The corresponding HCI passes commands / events
-to / from the physical HCI identified by the name @var{id} (default:
-@code{hci0}) on the computer running QEMU.  Only available on @code{bluez}
-capable systems like Linux.
-
-@item -bt hci[,vlan=@var{n}]
-Add a virtual, standard HCI that will participate in the Bluetooth
-scatternet @var{n} (default @code{0}).  Similarly to @option{-net}
-VLANs, devices inside a bluetooth network @var{n} can only communicate
-with other devices in the same network (scatternet).
-@end table
-
-@item -bt vhci[,vlan=@var{n}]
-(Linux-host only) Create a HCI in scatternet @var{n} (default 0) attached
-to the host bluetooth stack instead of to the emulated target.  This
-allows the host and target machines to participate in a common scatternet
-and communicate.  Requires the Linux @code{vhci} driver installed.  Can
-be used as following:
-
-@example
-@value{qemu_system} [...OPTIONS...] -bt hci,vlan=5 -bt vhci,vlan=5
-@end example
-
-@item -bt device:@var{dev}[,vlan=@var{n}]
-Emulate a bluetooth device @var{dev} and place it in network @var{n}
-(default @code{0}).  QEMU can only emulate one type of bluetooth devices
-currently:
-
-@table @option
-@item keyboard
-Virtual wireless keyboard implementing the HIDP bluetooth profile.
-@end table
 ETEXI
 
 STEXI
@@ -3934,7 +4016,8 @@ DEF("tb-size", HAS_ARG, QEMU_OPTION_tb_size, \
 STEXI
 @item -tb-size @var{n}
 @findex -tb-size
-Set TB size.
+Set TCG translation block cache size.  Deprecated, use @samp{-accel tcg,tb-size=@var{n}}
+instead.
 ETEXI
 
 DEF("incoming", HAS_ARG, QEMU_OPTION_incoming, \
@@ -4140,6 +4223,23 @@ HXCOMM HX does not support conditional compilation of text.
 @findex -trace
 @include qemu-option-trace.texi
 ETEXI
+DEF("plugin", HAS_ARG, QEMU_OPTION_plugin,
+    "-plugin [file=]<file>[,arg=<string>]\n"
+    "                load a plugin\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -plugin file=@var{file}[,arg=@var{string}]
+@findex -plugin
+
+Load a plugin.
+
+@table @option
+@item file=@var{file}
+Load the given plugin from a shared library file.
+@item arg=@var{string}
+Argument string passed to the plugin. (Can be given multiple times.)
+@end table
+ETEXI
 
 HXCOMM Internal use
 DEF("qtest", HAS_ARG, QEMU_OPTION_qtest, "", QEMU_ARCH_ALL)
@@ -4156,18 +4256,22 @@ STEXI
 Enable FIPS 140-2 compliance mode.
 ETEXI
 
-HXCOMM Deprecated by -machine accel=tcg property
+HXCOMM Deprecated by -accel tcg
 DEF("no-kvm", 0, QEMU_OPTION_no_kvm, "", QEMU_ARCH_I386)
 
 DEF("msg", HAS_ARG, QEMU_OPTION_msg,
     "-msg timestamp[=on|off]\n"
-    "                change the format of messages\n"
-    "                on|off controls leading timestamps (default:on)\n",
+    "                control error message format\n"
+    "                timestamp=on enables timestamps (default: off)\n",
     QEMU_ARCH_ALL)
 STEXI
 @item -msg timestamp[=on|off]
 @findex -msg
-prepend a timestamp to each log message.(default:on)
+Control error message format.
+@table @option
+@item timestamp=on|off
+Prefix messages with a timestamp.  Default is off.
+@end table
 ETEXI
 
 DEF("dump-vmstate", HAS_ARG, QEMU_OPTION_dump_vmstate,
@@ -4831,6 +4935,44 @@ access
 CN=laptop.example.com,O=Example Home,L=London,ST=London,C=GB
 @end example
 
+@item -object iothread,id=@var{id},poll-max-ns=@var{poll-max-ns},poll-grow=@var{poll-grow},poll-shrink=@var{poll-shrink}
+
+Creates a dedicated event loop thread that devices can be assigned to.  This is
+known as an IOThread.  By default device emulation happens in vCPU threads or
+the main event loop thread.  This can become a scalability bottleneck.
+IOThreads allow device emulation and I/O to run on other host CPUs.
+
+The @option{id} parameter is a unique ID that will be used to reference this
+IOThread from @option{-device ...,iothread=@var{id}}.  Multiple devices can be
+assigned to an IOThread.  Note that not all devices support an
+@option{iothread} parameter.
+
+The @code{query-iothreads} QMP command lists IOThreads and reports their thread
+IDs so that the user can configure host CPU pinning/affinity.
+
+IOThreads use an adaptive polling algorithm to reduce event loop latency.
+Instead of entering a blocking system call to monitor file descriptors and then
+pay the cost of being woken up when an event occurs, the polling algorithm
+spins waiting for events for a short time.  The algorithm's default parameters
+are suitable for many cases but can be adjusted based on knowledge of the
+workload and/or host device latency.
+
+The @option{poll-max-ns} parameter is the maximum number of nanoseconds to busy
+wait for events.  Polling can be disabled by setting this value to 0.
+
+The @option{poll-grow} parameter is the multiplier used to increase the polling
+time when the algorithm detects it is missing events due to not polling long
+enough.
+
+The @option{poll-shrink} parameter is the divisor used to decrease the polling
+time when the algorithm detects it is spending too long polling without
+encountering events.
+
+The polling parameters can be modified at run-time using the @code{qom-set} command (where @code{iothread1} is the IOThread's @code{id}):
+
+@example
+(qemu) qom-set /objects/iothread1 poll-max-ns 100000
+@end example
 
 @end table
 

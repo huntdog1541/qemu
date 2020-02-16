@@ -278,6 +278,7 @@ static void vnc_client_cache_addr(VncState *client)
     vnc_init_basic_info_from_remote_addr(client->sioc,
                                          qapi_VncClientInfo_base(client->info),
                                          &err);
+    client->info->websocket = client->websocket;
     if (err) {
         qapi_free_VncClientInfo(client->info);
         client->info = NULL;
@@ -897,8 +898,6 @@ int vnc_raw_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
 int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
 {
     int n = 0;
-    bool encode_raw = false;
-    size_t saved_offs = vs->output.offset;
 
     switch(vs->vnc_encoding) {
         case VNC_ENCODING_ZLIB:
@@ -921,24 +920,10 @@ int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
             n = vnc_zywrle_send_framebuffer_update(vs, x, y, w, h);
             break;
         default:
-            encode_raw = true;
+            vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
+            n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
             break;
     }
-
-    /* If the client has the same pixel format as our internal buffer and
-     * a RAW encoding would need less space fall back to RAW encoding to
-     * save bandwidth and processing power in the client. */
-    if (!encode_raw && vs->write_pixels == vnc_write_pixels_copy &&
-        12 + h * w * VNC_SERVER_FB_BYTES <= (vs->output.offset - saved_offs)) {
-        vs->output.offset = saved_offs;
-        encode_raw = true;
-    }
-
-    if (encode_raw) {
-        vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
-        n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
-    }
-
     return n;
 }
 
@@ -1306,10 +1291,12 @@ void vnc_disconnect_finish(VncState *vs)
     object_unref(OBJECT(vs->sioc));
     vs->sioc = NULL;
     vs->magic = 0;
+    g_free(vs->zrle);
+    g_free(vs->tight);
     g_free(vs);
 }
 
-size_t vnc_client_io_error(VncState *vs, ssize_t ret, Error **errp)
+size_t vnc_client_io_error(VncState *vs, ssize_t ret, Error *err)
 {
     if (ret <= 0) {
         if (ret == 0) {
@@ -1317,15 +1304,11 @@ size_t vnc_client_io_error(VncState *vs, ssize_t ret, Error **errp)
             vnc_disconnect_start(vs);
         } else if (ret != QIO_CHANNEL_ERR_BLOCK) {
             trace_vnc_client_io_error(vs, vs->ioc,
-                                      errp ? error_get_pretty(*errp) :
-                                      "Unknown");
+                                      err ? error_get_pretty(err) : "Unknown");
             vnc_disconnect_start(vs);
         }
 
-        if (errp) {
-            error_free(*errp);
-            *errp = NULL;
-        }
+        error_free(err);
         return 0;
     }
     return ret;
@@ -1358,10 +1341,9 @@ size_t vnc_client_write_buf(VncState *vs, const uint8_t *data, size_t datalen)
 {
     Error *err = NULL;
     ssize_t ret;
-    ret = qio_channel_write(
-        vs->ioc, (const char *)data, datalen, &err);
+    ret = qio_channel_write(vs->ioc, (const char *)data, datalen, &err);
     VNC_DEBUG("Wrote wire %p %zd -> %ld\n", data, datalen, ret);
-    return vnc_client_io_error(vs, ret, &err);
+    return vnc_client_io_error(vs, ret, err);
 }
 
 
@@ -1485,10 +1467,9 @@ size_t vnc_client_read_buf(VncState *vs, uint8_t *data, size_t datalen)
 {
     ssize_t ret;
     Error *err = NULL;
-    ret = qio_channel_read(
-        vs->ioc, (char *)data, datalen, &err);
+    ret = qio_channel_read(vs->ioc, (char *)data, datalen, &err);
     VNC_DEBUG("Read wire %p %zd -> %ld\n", data, datalen, ret);
-    return vnc_client_io_error(vs, ret, &err);
+    return vnc_client_io_error(vs, ret, err);
 }
 
 
@@ -2057,8 +2038,8 @@ static void set_encodings(VncState *vs, int32_t *encodings, size_t n_encodings)
 
     vs->features = 0;
     vs->vnc_encoding = 0;
-    vs->tight.compression = 9;
-    vs->tight.quality = -1; /* Lossless by default */
+    vs->tight->compression = 9;
+    vs->tight->quality = -1; /* Lossless by default */
     vs->absolute = -1;
 
     /*
@@ -2090,8 +2071,15 @@ static void set_encodings(VncState *vs, int32_t *encodings, size_t n_encodings)
             break;
 #endif
         case VNC_ENCODING_ZLIB:
-            vs->features |= VNC_FEATURE_ZLIB_MASK;
-            vs->vnc_encoding = enc;
+            /*
+             * VNC_ENCODING_ZRLE compresses better than VNC_ENCODING_ZLIB.
+             * So prioritize ZRLE, even if the client hints that it prefers
+             * ZLIB.
+             */
+            if ((vs->features & VNC_FEATURE_ZRLE_MASK) == 0) {
+                vs->features |= VNC_FEATURE_ZLIB_MASK;
+                vs->vnc_encoding = enc;
+            }
             break;
         case VNC_ENCODING_ZRLE:
             vs->features |= VNC_FEATURE_ZRLE_MASK;
@@ -2126,11 +2114,11 @@ static void set_encodings(VncState *vs, int32_t *encodings, size_t n_encodings)
             vs->features |= VNC_FEATURE_LED_STATE_MASK;
             break;
         case VNC_ENCODING_COMPRESSLEVEL0 ... VNC_ENCODING_COMPRESSLEVEL0 + 9:
-            vs->tight.compression = (enc & 0x0F);
+            vs->tight->compression = (enc & 0x0F);
             break;
         case VNC_ENCODING_QUALITYLEVEL0 ... VNC_ENCODING_QUALITYLEVEL0 + 9:
             if (vs->vd->lossy) {
-                vs->tight.quality = (enc & 0x0F);
+                vs->tight->quality = (enc & 0x0F);
             }
             break;
         default:
@@ -3033,6 +3021,8 @@ static void vnc_connect(VncDisplay *vd, QIOChannelSocket *sioc,
     int i;
 
     trace_vnc_client_connect(vs, sioc);
+    vs->zrle = g_new0(VncZrle, 1);
+    vs->tight = g_new0(VncTight, 1);
     vs->magic = VNC_MAGIC;
     vs->sioc = sioc;
     object_ref(OBJECT(vs->sioc));
@@ -3044,19 +3034,19 @@ static void vnc_connect(VncDisplay *vd, QIOChannelSocket *sioc,
     buffer_init(&vs->output,         "vnc-output/%p", sioc);
     buffer_init(&vs->jobs_buffer,    "vnc-jobs_buffer/%p", sioc);
 
-    buffer_init(&vs->tight.tight,    "vnc-tight/%p", sioc);
-    buffer_init(&vs->tight.zlib,     "vnc-tight-zlib/%p", sioc);
-    buffer_init(&vs->tight.gradient, "vnc-tight-gradient/%p", sioc);
+    buffer_init(&vs->tight->tight,    "vnc-tight/%p", sioc);
+    buffer_init(&vs->tight->zlib,     "vnc-tight-zlib/%p", sioc);
+    buffer_init(&vs->tight->gradient, "vnc-tight-gradient/%p", sioc);
 #ifdef CONFIG_VNC_JPEG
-    buffer_init(&vs->tight.jpeg,     "vnc-tight-jpeg/%p", sioc);
+    buffer_init(&vs->tight->jpeg,     "vnc-tight-jpeg/%p", sioc);
 #endif
 #ifdef CONFIG_VNC_PNG
-    buffer_init(&vs->tight.png,      "vnc-tight-png/%p", sioc);
+    buffer_init(&vs->tight->png,      "vnc-tight-png/%p", sioc);
 #endif
     buffer_init(&vs->zlib.zlib,      "vnc-zlib/%p", sioc);
-    buffer_init(&vs->zrle.zrle,      "vnc-zrle/%p", sioc);
-    buffer_init(&vs->zrle.fb,        "vnc-zrle-fb/%p", sioc);
-    buffer_init(&vs->zrle.zlib,      "vnc-zrle-zlib/%p", sioc);
+    buffer_init(&vs->zrle->zrle,      "vnc-zrle/%p", sioc);
+    buffer_init(&vs->zrle->fb,        "vnc-zrle-fb/%p", sioc);
+    buffer_init(&vs->zrle->zlib,      "vnc-zrle-zlib/%p", sioc);
 
     if (skipauth) {
         vs->auth = VNC_AUTH_NONE;

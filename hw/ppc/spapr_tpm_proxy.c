@@ -114,7 +114,7 @@ static target_ulong h_tpm_comm(PowerPCCPU *cpu,
         return H_FUNCTION;
     }
 
-    trace_spapr_h_tpm_comm(tpm_proxy->host_path ?: "null", op);
+    trace_spapr_h_tpm_comm(tpm_proxy->host_path, op);
 
     switch (op) {
     case TPM_COMM_OP_EXECUTE:
@@ -159,7 +159,7 @@ static void spapr_tpm_proxy_class_init(ObjectClass *k, void *data)
     dk->realize = spapr_tpm_proxy_realize;
     dk->unrealize = spapr_tpm_proxy_unrealize;
     dk->user_creatable = true;
-    dk->props = spapr_tpm_proxy_properties;
+    device_class_set_props(dk, spapr_tpm_proxy_properties);
 }
 
 static const TypeInfo spapr_tpm_proxy_info = {

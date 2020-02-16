@@ -205,9 +205,10 @@ static int spapr_tce_get_attr(IOMMUMemoryRegion *iommu,
     return -EINVAL;
 }
 
-static void spapr_tce_notify_flag_changed(IOMMUMemoryRegion *iommu,
-                                          IOMMUNotifierFlag old,
-                                          IOMMUNotifierFlag new)
+static int spapr_tce_notify_flag_changed(IOMMUMemoryRegion *iommu,
+                                         IOMMUNotifierFlag old,
+                                         IOMMUNotifierFlag new,
+                                         Error **errp)
 {
     struct SpaprTceTable *tbl = container_of(iommu, SpaprTceTable, iommu);
 
@@ -216,6 +217,7 @@ static void spapr_tce_notify_flag_changed(IOMMUMemoryRegion *iommu,
     } else if (old != IOMMU_NOTIFIER_NONE && new == IOMMU_NOTIFIER_NONE) {
         spapr_tce_set_need_vfio(tbl, false);
     }
+    return 0;
 }
 
 static int spapr_tce_table_post_load(void *opaque, int version_id)
@@ -315,7 +317,7 @@ static void spapr_tce_table_realize(DeviceState *dev, Error **errp)
 
     QLIST_INSERT_HEAD(&spapr_tce_tables, tcet, list);
 
-    vmstate_register(DEVICE(tcet), tcet->liobn, &vmstate_spapr_tce_table,
+    vmstate_register(VMSTATE_IF(tcet), tcet->liobn, &vmstate_spapr_tce_table,
                      tcet);
 }
 
@@ -418,7 +420,7 @@ static void spapr_tce_table_unrealize(DeviceState *dev, Error **errp)
 {
     SpaprTceTable *tcet = SPAPR_TCE_TABLE(dev);
 
-    vmstate_unregister(DEVICE(tcet), &vmstate_spapr_tce_table, tcet);
+    vmstate_unregister(VMSTATE_IF(tcet), &vmstate_spapr_tce_table, tcet);
 
     QLIST_REMOVE(tcet, list);
 

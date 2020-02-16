@@ -2242,12 +2242,9 @@ static void vmxnet3_instance_init(Object *obj)
 
 static void vmxnet3_pci_uninit(PCIDevice *pci_dev)
 {
-    DeviceState *dev = DEVICE(pci_dev);
     VMXNET3State *s = VMXNET3(pci_dev);
 
     VMW_CBPRN("Starting uninit...");
-
-    unregister_savevm(dev, "vmxnet3-msix", s);
 
     vmxnet3_net_uninit(s);
 
@@ -2509,7 +2506,7 @@ static void vmxnet3_class_init(ObjectClass *class, void *data)
     dc->desc = "VMWare Paravirtualized Ethernet v3";
     dc->reset = vmxnet3_qdev_reset;
     dc->vmsd = &vmstate_vmxnet3;
-    dc->props = vmxnet3_properties;
+    device_class_set_props(dc, vmxnet3_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 

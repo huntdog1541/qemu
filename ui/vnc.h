@@ -338,10 +338,10 @@ struct VncState
     /* Encoding specific, if you add something here, don't forget to
      *  update vnc_async_encoding_start()
      */
-    VncTight tight;
+    VncTight *tight;
     VncZlib zlib;
     VncHextile hextile;
-    VncZrle zrle;
+    VncZrle *zrle;
     VncZywrle zywrle;
 
     Notifier mouse_mode_notifier;
@@ -547,7 +547,7 @@ uint32_t read_u32(uint8_t *data, size_t offset);
 
 /* Protocol stage functions */
 void vnc_client_error(VncState *vs);
-size_t vnc_client_io_error(VncState *vs, ssize_t ret, Error **errp);
+size_t vnc_client_io_error(VncState *vs, ssize_t ret, Error *err);
 
 void start_client_init(VncState *vs);
 void start_auth_vnc(VncState *vs);

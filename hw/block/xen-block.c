@@ -313,6 +313,7 @@ static void xen_block_frontend_changed(XenDevice *xendev,
         break;
 
     case XenbusStateClosed:
+    case XenbusStateUnknown:
         xen_block_disconnect(xendev, &local_err);
         if (local_err) {
             error_propagate(errp, local_err);
@@ -553,7 +554,7 @@ static void xen_block_class_init(ObjectClass *class, void *data)
     xendev_class->frontend_changed = xen_block_frontend_changed;
     xendev_class->unrealize = xen_block_unrealize;
 
-    dev_class->props = xen_block_props;
+    device_class_set_props(dev_class, xen_block_props);
 }
 
 static const TypeInfo xen_block_type_info = {

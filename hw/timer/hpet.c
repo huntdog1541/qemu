@@ -33,7 +33,8 @@
 #include "qemu/timer.h"
 #include "hw/timer/hpet.h"
 #include "hw/sysbus.h"
-#include "hw/timer/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc_regs.h"
 #include "migration/vmstate.h"
 #include "hw/timer/i8254.h"
 
@@ -799,7 +800,7 @@ static void hpet_device_class_init(ObjectClass *klass, void *data)
     dc->realize = hpet_realize;
     dc->reset = hpet_reset;
     dc->vmsd = &vmstate_hpet;
-    dc->props = hpet_device_properties;
+    device_class_set_props(dc, hpet_device_properties);
 }
 
 static const TypeInfo hpet_device_info = {

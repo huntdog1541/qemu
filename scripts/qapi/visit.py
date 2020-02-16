@@ -14,6 +14,8 @@ See the COPYING file in the top-level directory.
 """
 
 from qapi.common import *
+from qapi.gen import QAPISchemaModularCVisitor, ifcontext
+from qapi.schema import QAPISchemaObjectType
 
 
 def gen_visit_decl(name, scalar=False):
@@ -283,8 +285,9 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
     def __init__(self, prefix):
         QAPISchemaModularCVisitor.__init__(
             self, prefix, 'qapi-visit', ' * Schema-defined QAPI visitors',
-            __doc__)
-        self._add_system_module(None, ' * Built-in QAPI visitors')
+            ' * Built-in QAPI visitors', __doc__)
+
+    def _begin_system_module(self, name):
         self._genc.preamble_add(mcgen('''
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -294,8 +297,7 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
 #include "qapi/visitor.h"
 #include "qapi/qapi-builtin-types.h"
 
-''',
-                                      prefix=prefix))
+'''))
 
     def _begin_user_module(self, name):
         types = self._module_basename('qapi-types', name)

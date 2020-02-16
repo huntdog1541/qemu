@@ -703,9 +703,10 @@ static bool trans_VMSR_VMRS(DisasContext *s, arg_VMSR_VMRS *a)
     if (arm_dc_feature(s, ARM_FEATURE_M)) {
         /*
          * The only M-profile VFP vmrs/vmsr sysreg is FPSCR.
-         * Writes to R15 are UNPREDICTABLE; we choose to undef.
+         * Accesses to R15 are UNPREDICTABLE; we choose to undef.
+         * (FPSCR -> r15 is a special case which writes to the PSR flags.)
          */
-        if (a->rt == 15 || a->reg != ARM_VFP_FPSCR) {
+        if (a->rt == 15 && (!a->l || a->reg != ARM_VFP_FPSCR)) {
             return false;
         }
     }
@@ -760,13 +761,25 @@ static bool trans_VMSR_VMRS(DisasContext *s, arg_VMSR_VMRS *a)
     if (a->l) {
         /* VMRS, move VFP special register to gp register */
         switch (a->reg) {
-        case ARM_VFP_FPSID:
-        case ARM_VFP_FPEXC:
-        case ARM_VFP_FPINST:
-        case ARM_VFP_FPINST2:
         case ARM_VFP_MVFR0:
         case ARM_VFP_MVFR1:
         case ARM_VFP_MVFR2:
+        case ARM_VFP_FPSID:
+            if (s->current_el == 1) {
+                TCGv_i32 tcg_reg, tcg_rt;
+
+                gen_set_condexec(s);
+                gen_set_pc_im(s, s->pc_curr);
+                tcg_reg = tcg_const_i32(a->reg);
+                tcg_rt = tcg_const_i32(a->rt);
+                gen_helper_check_hcr_el2_trap(cpu_env, tcg_rt, tcg_reg);
+                tcg_temp_free_i32(tcg_reg);
+                tcg_temp_free_i32(tcg_rt);
+            }
+            /* fall through */
+        case ARM_VFP_FPEXC:
+        case ARM_VFP_FPINST:
+        case ARM_VFP_FPINST2:
             tmp = load_cpu_field(vfp.xregs[a->reg]);
             break;
         case ARM_VFP_FPSCR:

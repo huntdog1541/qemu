@@ -7,6 +7,7 @@
 #include "tests/test-qapi-types.h"
 #include "tests/test-qapi-visit.h"
 #include "test-qapi-commands.h"
+#include "test-qapi-init-commands.h"
 
 static QmpCommandList qmp_commands;
 
@@ -48,6 +49,30 @@ void qmp_test_features(FeatureStruct0 *fs0, FeatureStruct1 *fs1,
                        FeatureStruct4 *fs4, CondFeatureStruct1 *cfs1,
                        CondFeatureStruct2 *cfs2, CondFeatureStruct3 *cfs3,
                        Error **errp)
+{
+}
+
+void qmp_test_command_features0(Error **errp)
+{
+}
+
+void qmp_test_command_features1(Error **errp)
+{
+}
+
+void qmp_test_command_features3(Error **errp)
+{
+}
+
+void qmp_test_command_cond_features1(Error **errp)
+{
+}
+
+void qmp_test_command_cond_features2(Error **errp)
+{
+}
+
+void qmp_test_command_cond_features3(Error **errp)
 {
 }
 
@@ -94,6 +119,10 @@ void qmp_boxed_struct(UserDefZero *arg, Error **errp)
 }
 
 void qmp_boxed_union(UserDefListUnion *arg, Error **errp)
+{
+}
+
+void qmp_boxed_empty(Empty1 *arg, Error **errp)
 {
 }
 

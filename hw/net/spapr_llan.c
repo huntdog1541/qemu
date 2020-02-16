@@ -27,7 +27,6 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "hw/irq.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "net/net.h"
@@ -267,7 +266,7 @@ static ssize_t spapr_vlan_receive(NetClientState *nc, const uint8_t *buf,
     }
 
     if (sdev->signal_state & 1) {
-        qemu_irq_pulse(spapr_vio_qirq(sdev));
+        spapr_vio_irq_pulse(sdev);
     }
 
     return size;
@@ -857,7 +856,7 @@ static void spapr_vlan_class_init(ObjectClass *klass, void *data)
     k->dt_compatible = "IBM,l-lan";
     k->signal_mask = 0x1;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
-    dc->props = spapr_vlan_properties;
+    device_class_set_props(dc, spapr_vlan_properties);
     k->rtce_window_size = 0x10000000;
     dc->vmsd = &vmstate_spapr_llan;
 }

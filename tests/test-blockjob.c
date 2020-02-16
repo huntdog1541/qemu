@@ -22,7 +22,6 @@ static const BlockJobDriver test_block_job_driver = {
         .instance_size = sizeof(BlockJob),
         .free          = block_job_free,
         .user_resume   = block_job_user_resume,
-        .drain         = block_job_drain,
     },
 };
 
@@ -35,13 +34,13 @@ static BlockJob *mk_job(BlockBackend *blk, const char *id,
                         int flags)
 {
     BlockJob *job;
-    Error *errp = NULL;
+    Error *err = NULL;
 
     job = block_job_create(id, drv, NULL, blk_bs(blk),
                            0, BLK_PERM_ALL, 0, flags, block_job_cb,
-                           NULL, &errp);
+                           NULL, &err);
     if (should_succeed) {
-        g_assert_null(errp);
+        g_assert_null(err);
         g_assert_nonnull(job);
         if (id) {
             g_assert_cmpstr(job->job.id, ==, id);
@@ -49,9 +48,8 @@ static BlockJob *mk_job(BlockBackend *blk, const char *id,
             g_assert_cmpstr(job->job.id, ==, blk_name(blk));
         }
     } else {
-        g_assert_nonnull(errp);
+        error_free_or_abort(&err);
         g_assert_null(job);
-        error_free(errp);
     }
 
     return job;
@@ -81,9 +79,9 @@ static BlockBackend *create_blk(const char *name)
     bdrv_unref(bs);
 
     if (name) {
-        Error *errp = NULL;
-        monitor_add_blk(blk, name, &errp);
-        g_assert_null(errp);
+        Error *err = NULL;
+        monitor_add_blk(blk, name, &err);
+        g_assert_null(err);
     }
 
     return blk;
@@ -196,7 +194,6 @@ static const BlockJobDriver test_cancel_driver = {
         .instance_size = sizeof(CancelJob),
         .free          = block_job_free,
         .user_resume   = block_job_user_resume,
-        .drain         = block_job_drain,
         .run           = cancel_job_run,
         .complete      = cancel_job_complete,
     },

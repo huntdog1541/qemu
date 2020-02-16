@@ -288,10 +288,16 @@ typedef struct IOMMUMemoryRegionClass {
      * @iommu: the IOMMUMemoryRegion
      * @old_flags: events which previously needed to be notified
      * @new_flags: events which now need to be notified
+     *
+     * Returns 0 on success, or a negative errno; in particular
+     * returns -EINVAL if the new flag bitmap is not supported by the
+     * IOMMU memory region. In case of failure, the error object
+     * must be created
      */
-    void (*notify_flag_changed)(IOMMUMemoryRegion *iommu,
-                                IOMMUNotifierFlag old_flags,
-                                IOMMUNotifierFlag new_flags);
+    int (*notify_flag_changed)(IOMMUMemoryRegion *iommu,
+                               IOMMUNotifierFlag old_flags,
+                               IOMMUNotifierFlag new_flags,
+                               Error **errp);
     /* Called to handle memory_region_iommu_replay().
      *
      * The default implementation of memory_region_iommu_replay() is to
@@ -354,10 +360,14 @@ typedef struct IOMMUMemoryRegionClass {
 typedef struct CoalescedMemoryRange CoalescedMemoryRange;
 typedef struct MemoryRegionIoeventfd MemoryRegionIoeventfd;
 
+/** MemoryRegion:
+ *
+ * A struct representing a memory region.
+ */
 struct MemoryRegion {
     Object parent_obj;
 
-    /* All fields are private - violators will be prosecuted */
+    /* private: */
 
     /* The following fields should fit in a cache line */
     bool romd_mode;
@@ -413,30 +423,232 @@ struct IOMMUMemoryRegion {
  * Use with memory_listener_register() and memory_listener_unregister().
  */
 struct MemoryListener {
+    /**
+     * @begin:
+     *
+     * Called at the beginning of an address space update transaction.
+     * Followed by calls to #MemoryListener.region_add(),
+     * #MemoryListener.region_del(), #MemoryListener.region_nop(),
+     * #MemoryListener.log_start() and #MemoryListener.log_stop() in
+     * increasing address order.
+     *
+     * @listener: The #MemoryListener.
+     */
     void (*begin)(MemoryListener *listener);
+
+    /**
+     * @commit:
+     *
+     * Called at the end of an address space update transaction,
+     * after the last call to #MemoryListener.region_add(),
+     * #MemoryListener.region_del() or #MemoryListener.region_nop(),
+     * #MemoryListener.log_start() and #MemoryListener.log_stop().
+     *
+     * @listener: The #MemoryListener.
+     */
     void (*commit)(MemoryListener *listener);
+
+    /**
+     * @region_add:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that is new in this address space
+     * space since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The new #MemoryRegionSection.
+     */
     void (*region_add)(MemoryListener *listener, MemoryRegionSection *section);
+
+    /**
+     * @region_del:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that has disappeared in the address
+     * space since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The old #MemoryRegionSection.
+     */
     void (*region_del)(MemoryListener *listener, MemoryRegionSection *section);
+
+    /**
+     * @region_nop:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that is in the same place in the address
+     * space as in the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The #MemoryRegionSection.
+     */
     void (*region_nop)(MemoryListener *listener, MemoryRegionSection *section);
+
+    /**
+     * @log_start:
+     *
+     * Called during an address space update transaction, after
+     * one of #MemoryListener.region_add(),#MemoryListener.region_del() or
+     * #MemoryListener.region_nop(), if dirty memory logging clients have
+     * become active since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The #MemoryRegionSection.
+     * @old: A bitmap of dirty memory logging clients that were active in
+     * the previous transaction.
+     * @new: A bitmap of dirty memory logging clients that are active in
+     * the current transaction.
+     */
     void (*log_start)(MemoryListener *listener, MemoryRegionSection *section,
                       int old, int new);
+
+    /**
+     * @log_stop:
+     *
+     * Called during an address space update transaction, after
+     * one of #MemoryListener.region_add(), #MemoryListener.region_del() or
+     * #MemoryListener.region_nop() and possibly after
+     * #MemoryListener.log_start(), if dirty memory logging clients have
+     * become inactive since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The #MemoryRegionSection.
+     * @old: A bitmap of dirty memory logging clients that were active in
+     * the previous transaction.
+     * @new: A bitmap of dirty memory logging clients that are active in
+     * the current transaction.
+     */
     void (*log_stop)(MemoryListener *listener, MemoryRegionSection *section,
                      int old, int new);
+
+    /**
+     * @log_sync:
+     *
+     * Called by memory_region_snapshot_and_clear_dirty() and
+     * memory_global_dirty_log_sync(), before accessing QEMU's "official"
+     * copy of the dirty memory bitmap for a #MemoryRegionSection.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The #MemoryRegionSection.
+     */
     void (*log_sync)(MemoryListener *listener, MemoryRegionSection *section);
+
+    /**
+     * @log_clear:
+     *
+     * Called before reading the dirty memory bitmap for a
+     * #MemoryRegionSection.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The #MemoryRegionSection.
+     */
     void (*log_clear)(MemoryListener *listener, MemoryRegionSection *section);
+
+    /**
+     * @log_global_start:
+     *
+     * Called by memory_global_dirty_log_start(), which
+     * enables the %DIRTY_LOG_MIGRATION client on all memory regions in
+     * the address space.  #MemoryListener.log_global_start() is also
+     * called when a #MemoryListener is added, if global dirty logging is
+     * active at that time.
+     *
+     * @listener: The #MemoryListener.
+     */
     void (*log_global_start)(MemoryListener *listener);
+
+    /**
+     * @log_global_stop:
+     *
+     * Called by memory_global_dirty_log_stop(), which
+     * disables the %DIRTY_LOG_MIGRATION client on all memory regions in
+     * the address space.
+     *
+     * @listener: The #MemoryListener.
+     */
     void (*log_global_stop)(MemoryListener *listener);
+
+    /**
+     * @log_global_after_sync:
+     *
+     * Called after reading the dirty memory bitmap
+     * for any #MemoryRegionSection.
+     *
+     * @listener: The #MemoryListener.
+     */
     void (*log_global_after_sync)(MemoryListener *listener);
+
+    /**
+     * @eventfd_add:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that has had a new ioeventfd
+     * registration since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The new #MemoryRegionSection.
+     * @match_data: The @match_data parameter for the new ioeventfd.
+     * @data: The @data parameter for the new ioeventfd.
+     * @e: The #EventNotifier parameter for the new ioeventfd.
+     */
     void (*eventfd_add)(MemoryListener *listener, MemoryRegionSection *section,
                         bool match_data, uint64_t data, EventNotifier *e);
+
+    /**
+     * @eventfd_del:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that has dropped an ioeventfd
+     * registration since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The new #MemoryRegionSection.
+     * @match_data: The @match_data parameter for the dropped ioeventfd.
+     * @data: The @data parameter for the dropped ioeventfd.
+     * @e: The #EventNotifier parameter for the dropped ioeventfd.
+     */
     void (*eventfd_del)(MemoryListener *listener, MemoryRegionSection *section,
                         bool match_data, uint64_t data, EventNotifier *e);
+
+    /**
+     * @coalesced_io_add:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that has had a new coalesced
+     * MMIO range registration since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The new #MemoryRegionSection.
+     * @addr: The starting address for the coalesced MMIO range.
+     * @len: The length of the coalesced MMIO range.
+     */
     void (*coalesced_io_add)(MemoryListener *listener, MemoryRegionSection *section,
                                hwaddr addr, hwaddr len);
+
+    /**
+     * @coalesced_io_del:
+     *
+     * Called during an address space update transaction,
+     * for a section of the address space that has dropped a coalesced
+     * MMIO range since the last transaction.
+     *
+     * @listener: The #MemoryListener.
+     * @section: The new #MemoryRegionSection.
+     * @addr: The starting address for the coalesced MMIO range.
+     * @len: The length of the coalesced MMIO range.
+     */
     void (*coalesced_io_del)(MemoryListener *listener, MemoryRegionSection *section,
                                hwaddr addr, hwaddr len);
-    /* Lower = earlier (during add), later (during del) */
+    /**
+     * @priority:
+     *
+     * Govern the order in which memory listeners are invoked. Lower priorities
+     * are invoked earlier for "add" or "start" callbacks, and later for "delete"
+     * or "stop" callbacks.
+     */
     unsigned priority;
+
+    /* private: */
     AddressSpace *address_space;
     QTAILQ_ENTRY(MemoryListener) link;
     QTAILQ_ENTRY(MemoryListener) link_as;
@@ -446,7 +658,7 @@ struct MemoryListener {
  * AddressSpace: describes a mapping of addresses to #MemoryRegion objects
  */
 struct AddressSpace {
-    /* All fields are private. */
+    /* private: */
     struct rcu_head rcu;
     char *name;
     MemoryRegion *root;
@@ -495,14 +707,26 @@ static inline FlatView *address_space_to_flatview(AddressSpace *as)
  * @nonvolatile: this section is non-volatile
  */
 struct MemoryRegionSection {
+    Int128 size;
     MemoryRegion *mr;
     FlatView *fv;
     hwaddr offset_within_region;
-    Int128 size;
     hwaddr offset_within_address_space;
     bool readonly;
     bool nonvolatile;
 };
+
+static inline bool MemoryRegionSection_eq(MemoryRegionSection *a,
+                                          MemoryRegionSection *b)
+{
+    return a->mr == b->mr &&
+           a->fv == b->fv &&
+           a->offset_within_region == b->offset_within_region &&
+           a->offset_within_address_space == b->offset_within_address_space &&
+           int128_eq(a->size, b->size) &&
+           a->readonly == b->readonly &&
+           a->nonvolatile == b->nonvolatile;
+}
 
 /**
  * memory_region_init: Initialize a memory region
@@ -918,6 +1142,7 @@ void memory_region_init_rom(MemoryRegion *mr,
  * @mr: the #MemoryRegion to be initialized.
  * @owner: the object that tracks the region's reference count
  * @ops: callbacks for write access handling (must not be NULL).
+ * @opaque: passed to the read and write callbacks of the @ops structure.
  * @name: Region name, becomes part of RAMBlock name used in migration stream
  *        must be unique within any device
  * @size: size of the region.
@@ -1006,7 +1231,7 @@ static inline IOMMUMemoryRegion *memory_region_get_iommu(MemoryRegion *mr)
  * Returns pointer to IOMMUMemoryRegionClass if a memory region is an iommu,
  * otherwise NULL. This is fast path avoiding QOM checking, use with caution.
  *
- * @mr: the memory region being queried
+ * @iommu_mr: the memory region being queried
  */
 static inline IOMMUMemoryRegionClass *memory_region_get_iommu_class_nocheck(
         IOMMUMemoryRegion *iommu_mr)
@@ -1067,13 +1292,19 @@ void memory_region_notify_one(IOMMUNotifier *notifier,
  * memory_region_register_iommu_notifier: register a notifier for changes to
  * IOMMU translation entries.
  *
+ * Returns 0 on success, or a negative errno otherwise. In particular,
+ * -EINVAL indicates that at least one of the attributes of the notifier
+ * is not supported (flag/range) by the IOMMU memory region. In case of error
+ * the error object must be created.
+ *
  * @mr: the memory region to observe
  * @n: the IOMMUNotifier to be added; the notify callback receives a
  *     pointer to an #IOMMUTLBEntry as the opaque value; the pointer
  *     ceases to be valid on exit from the notifier.
+ * @errp: pointer to Error*, to store an error if it happens.
  */
-void memory_region_register_iommu_notifier(MemoryRegion *mr,
-                                           IOMMUNotifier *n);
+int memory_region_register_iommu_notifier(MemoryRegion *mr,
+                                          IOMMUNotifier *n, Error **errp);
 
 /**
  * memory_region_iommu_replay: replay existing IOMMU translations to
@@ -1242,6 +1473,15 @@ void *memory_region_get_ram_ptr(MemoryRegion *mr);
  */
 void memory_region_ram_resize(MemoryRegion *mr, ram_addr_t newsize,
                               Error **errp);
+/**
+ * memory_region_do_writeback: Trigger cache writeback or msync for
+ * selected address range
+ *
+ * @mr: the memory region to be updated
+ * @addr: the initial address of the range to be written back
+ * @size: the size of the range to be written back
+ */
+void memory_region_do_writeback(MemoryRegion *mr, hwaddr addr, hwaddr size);
 
 /**
  * memory_region_set_log: Turn dirty logging on or off for a region.
@@ -1558,6 +1798,8 @@ void memory_region_add_subregion_overlap(MemoryRegion *mr,
 /**
  * memory_region_get_ram_addr: Get the ram address associated with a memory
  *                             region
+ *
+ * @mr: the region to be queried
  */
 ram_addr_t memory_region_get_ram_addr(MemoryRegion *mr);
 
@@ -1650,8 +1892,8 @@ bool memory_region_is_mapped(MemoryRegion *mr);
  *
  * Returns a #MemoryRegionSection that describes a contiguous overlap.
  * It will have the following characteristics:
- *    .@size = 0 iff no overlap was found
- *    .@mr is non-%NULL iff an overlap was found
+ * - @size = 0 iff no overlap was found
+ * - @mr is non-%NULL iff an overlap was found
  *
  * Remember that in the return value the @offset_within_region is
  * relative to the returned region (in the .@mr field), not to the
@@ -1662,8 +1904,8 @@ bool memory_region_is_mapped(MemoryRegion *mr);
  * returned one.  However, in the special case where the @mr argument
  * has no container (and thus is the root of the address space), the
  * following will hold:
- *    .@offset_within_address_space >= @addr
- *    .@offset_within_address_space + .@size <= @addr + @size
+ * - @offset_within_address_space >= @addr
+ * - @offset_within_address_space + .@size <= @addr + @size
  *
  * @mr: a MemoryRegion within which @addr is a relative address
  * @addr: start of the area within @as to be searched
@@ -2128,6 +2370,7 @@ static inline bool memory_access_is_direct(MemoryRegion *mr, bool is_write)
  * @addr: address within that address space
  * @attrs: memory transaction attributes
  * @buf: buffer with the data transferred
+ * @len: length of the data transferred
  */
 static inline __attribute__((__always_inline__))
 MemTxResult address_space_read(AddressSpace *as, hwaddr addr,
@@ -2142,7 +2385,7 @@ MemTxResult address_space_read(AddressSpace *as, hwaddr addr,
 
     if (__builtin_constant_p(len)) {
         if (len) {
-            rcu_read_lock();
+            RCU_READ_LOCK_GUARD();
             fv = address_space_to_flatview(as);
             l = len;
             mr = flatview_translate(fv, addr, &addr1, &l, false, attrs);
@@ -2153,7 +2396,6 @@ MemTxResult address_space_read(AddressSpace *as, hwaddr addr,
                 result = flatview_read_continue(fv, addr, attrs, buf, len,
                                                 addr1, l, mr);
             }
-            rcu_read_unlock();
         }
     } else {
         result = address_space_read_full(as, addr, attrs, buf, len);
@@ -2201,8 +2443,25 @@ address_space_write_cached(MemoryRegionCache *cache, hwaddr addr,
     }
 }
 
+#ifdef NEED_CPU_H
 /* enum device_endian to MemOp.  */
-MemOp devend_memop(enum device_endian end);
+static inline MemOp devend_memop(enum device_endian end)
+{
+    QEMU_BUILD_BUG_ON(DEVICE_HOST_ENDIAN != DEVICE_LITTLE_ENDIAN &&
+                      DEVICE_HOST_ENDIAN != DEVICE_BIG_ENDIAN);
+
+#if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
+    /* Swap if non-host endianness or native (target) endianness */
+    return (end == DEVICE_HOST_ENDIAN) ? 0 : MO_BSWAP;
+#else
+    const int non_host_endianness =
+        DEVICE_LITTLE_ENDIAN ^ DEVICE_BIG_ENDIAN ^ DEVICE_HOST_ENDIAN;
+
+    /* In this case, native (target) endianness needs no swap.  */
+    return (end == non_host_endianness) ? MO_BSWAP : 0;
+#endif
+}
+#endif
 
 #endif
 
